@@ -1,0 +1,24 @@
+ExpreGaze/
+├── configs/
+├── data/
+│   ├── raw/
+│   │   └── MovieNet/
+│   │       └── files/
+│   │           ├── annotation.v1.zip
+│   │           ├── meta.v1.zip
+│   │           ├── script1K.v1.zip
+│   │           ├── subtitle1K.v1.zip
+│   │           └── <movie_video>.mkv
+│   ├── interim/
+│   │   ├── shot_level/
+│   │   ├── keyframes/
+│   │   ├── face_detection/
+│   │   ├── main_subject/
+│   │   └── proxy_candidates/
+│   └── processed/
+│       ├── final_proxy/
+│       └── reports/
+├── scripts/
+├── src/
+│   └── expregaze/
+└── outputs/

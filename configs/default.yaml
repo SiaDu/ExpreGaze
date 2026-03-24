@@ -1,0 +1,31 @@
+face_detection:
+  yunet_model: "/home/sdu/models_yunet/face_detection_yunet_2023mar.onnx"
+  score_threshold: 0.6
+  nms_threshold: 0.3
+  top_k: 5000
+  resize_max: 960
+
+candidate_filter:
+  min_faces: 1
+  max_faces: 3
+  max_count_range: 1
+  min_frames_with_face: 2
+  min_mean_det_score: 0.70
+
+main_subject:
+  area_weight: 0.45
+  center_weight: 0.35
+  det_weight: 0.20
+  center_std_threshold: 120
+  bbox_iou_threshold: 0.25
+
+head_direction:
+  nose_offset_threshold: 0.10
+  min_consensus_frames: 2
+
+duration_bins:
+  - {name: "DU_01", max: 2}
+  - {name: "DU_02", max: 5}
+  - {name: "DU_03", max: 10}
+  - {name: "DU_04", max: 20}
+  - {name: "DU_05", max: null}

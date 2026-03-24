@@ -1,0 +1,80 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Local env/version
+.python-version
+
+# Data folders
+data/raw/
+data/interim/
+data/processed/
+outputs/
+
+# Large media
+*.mp4
+*.mkv
+*.avi
+*.mov
+*.wav
+*.mp3
+*.flac
+
+# Images generated during processing
+*.jpg
+*.jpeg
+*.png
+
+# Model weights / binaries
+*.onnx
+*.pt
+*.pth
+*.ckpt
+*.bin
+
+# Blender temp / outputs
+*.blend1
+*.blend2
+blender/outputs/
+
+# Git internals or accidental junk
+.git/
+
+# Temp
+tmp/
+temp/
+assets/
+# Notebook exports / temp
+*.html
+
+# CSV / JSON outputs generated during experiments
+data/**/*.csv
+data/**/*.jsonl
+data/**/*.npy
+data/**/*.npz
+
+# Optional blender heavy files
+*.blend
