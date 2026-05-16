@@ -1,6 +1,0 @@
-[
-  {"t0": 0.20, "t1": 2.00, "target": "TGT_Partner"},
-  {"t0": 2.00, "t1": 3.30, "target": "TGT_Object"},
-  {"t0": 3.30, "t1": 5.10, "target": "TGT_Partner"},
-  {"t0": 5.10, "t1": 8.20, "target": "TGT_UP_R"}
-]

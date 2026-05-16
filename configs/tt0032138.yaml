@@ -1,0 +1,23 @@
+movie:
+  movie_id: tt0032138
+  title: The Wizard of Oz
+  fps: null
+
+files:
+  annotation_file: tt0032138.json
+  meta_file: tt0032138.json
+  script_file: tt0032138.script
+  subtitle_file: tt0032138.srt
+  video_file: tt0032138.mp4
+
+character_map:
+
+  CHAR_A:
+    name: null
+    movienet_pid: null
+    script_aliases: null
+
+  CHAR_B:
+    name: null
+    movienet_pid: null
+    script_aliases: null

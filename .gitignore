@@ -27,12 +27,27 @@ Thumbs.db
 
 # Local env/version
 .python-version
+.env
+.env.*
+
+# Local agent/tool state
+.codex
+
+# Local machine config
+configs/path_local.yaml
+configs/*local*.yaml
 
 # Data folders
 data/raw/
 data/interim/
 data/processed/
 outputs/
+
+# Historical snapshots / old experiments
+archive/
+
+# External model repos and downloaded model assets
+models/
 
 # Large media
 *.mp4
@@ -67,6 +82,14 @@ blender/outputs/
 tmp/
 temp/
 assets/
+
+# Test / tool caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
 # Notebook exports / temp
 *.html
 

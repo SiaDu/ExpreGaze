@@ -3,10 +3,49 @@ name = "expregaze"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.13"
 dependencies = [
+    "imageio>=2.37.0",
+    "imageio-ffmpeg>=0.6.0",
+    "ipykernel>=7.2.0",
     "jupyter>=1.1.1",
-    "matplotlib>=3.10.8",
-    "opencv-python>=4.13.0.92",
-    "pandas>=3.0.1",
+    "matplotlib>=3.10.0",
+    "notebook>=7.5.6",
+    "numpy>=2.0.0",
+    "openai>=2.37.0",
+    "opencv-python>=4.10.0",
+    "pandas>=2.2.0",
+    "pillow>=11.0.0",
+    "pydantic>=2.13.4",
+    "python-dotenv>=1.2.2",
+    "pyyaml>=6.0.0",
+    "requests>=2.34.2",
+    "scipy>=1.14.0",
+    "torch==2.5.1",
+    "torchvision==0.20.1",
+    "tqdm>=4.67.0",
 ]
+
+[tool.uv]
+environments = [
+    "sys_platform == 'linux' and python_version >= '3.12' and python_version < '3.13'",
+]
+
+[tool.uv.workspace]
+members = [
+    "models/gaze_estimation/L2CS-Net",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu121"
+url = "https://download.pytorch.org/whl/cu121"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu121", marker = "sys_platform == 'linux'" },
+]
+torchvision = [
+    { index = "pytorch-cu121", marker = "sys_platform == 'linux'" },
+]
+l2cs = { workspace = true, editable = true }

@@ -1,0 +1,71 @@
+project:
+  name: ExpreGaze
+  default_movie_id: tt0032138
+
+runtime:
+  overwrite: false
+  resume: true
+  verbose: true
+  random_seed: 42
+
+llm:
+  provider: openai
+  model: gpt-5-mini
+  temperature: 0.2
+  max_output_tokens: 1000
+  api_key_env: OPENAI_API_KEY
+
+shot_level:
+  save_csv: true
+  save_jsonl: true
+  require_subtitle: true
+  require_cast: false
+
+alignment:
+  use_gpt: true
+  cache_responses: true
+  resume: true
+  max_retries: 3
+  request_sleep_sec: 2
+  max_context_shots: 8
+
+candidate_sequence:
+  min_duration_sec: 5
+  max_duration_sec: 20
+  min_shots: 3
+  max_shots: 10
+  min_utterances: 2
+  min_speaker_changes: 1
+  allow_unknown_speaker: true
+
+gaze_script:
+  allowed_modes:
+    - GAZE
+    - GLANCE
+    - AVERT
+
+  allowed_intents:
+    - ADDRESS
+    - LISTEN
+    - THINK
+    - AVOID
+    - REACT
+    - OBSERVE
+
+  allowed_targets:
+    - CHARACTER
+    - OBJECT
+    - OFFSCREEN
+    - DOWN
+    - UP
+    - LEFT
+    - RIGHT
+    - GROUP
+
+video_proxy:
+  enabled: false
+  fps: 25
+  face_crop_margin: 0.25
+  min_track_length_frames: 10
+  min_openface_confidence: 0.8
+  save_face_crops: true

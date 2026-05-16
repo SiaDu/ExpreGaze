@@ -1,0 +1,81 @@
+run:
+  id: text_main_tt1591095
+  description: "Main MovieNetData-to-gaze-script pipeline for tt1591095"
+  movie_config: configs/tt1591095.yaml
+
+inputs:
+  base_config: configs/base.yaml
+  paths_config: configs/path_local.yaml
+
+data:
+  movie_id: tt1591095
+
+outputs:
+  root: outputs/text_main/tt1591095
+
+  shot_level_csv: data/processed/shot_level/tt1591095__shot_level.csv
+  shot_level_jsonl: data/processed/shot_level/tt1591095__shot_level.jsonl
+
+  full_context_csv: data/processed/full_context/tt1591095__full_context.csv
+  full_context_jsonl: data/processed/full_context/tt1591095__full_context.jsonl
+
+  candidate_sequences_csv: data/processed/candidate_sequences/tt1591095__candidate_sequences.csv
+  candidate_sequences_jsonl: data/processed/candidate_sequences/tt1591095__candidate_sequences.jsonl
+
+  llm_gaze_dir: outputs/text_main/tt1591095/llm_gaze_scripts
+  logs_dir: outputs/text_main/tt1591095/logs
+  cache_dir: outputs/text_main/tt1591095/cache
+
+stages:
+  process_shot_level:
+    enabled: true
+    overwrite: false
+
+  align_full_context_with_gpt:
+    enabled: true
+    mode: raw
+    overwrite: false
+    resume: true
+    cache_responses: true
+    batch_size: 1
+    max_retries: 3
+    request_sleep_sec: 2
+    max_raw_span: 4
+    max_dialogue_span: 4
+    skip_raw_penalty: 0.15
+    skip_dialogue_penalty: 0.15
+    min_match_score: 0.45
+    confident_threshold: 0.60
+    use_llm: false
+    llm_repair_scope: unmatched_or_low_confidence
+    max_llm_rows: 25
+    llm_output_csv: data/processed/full_context/tt1591095__full_context_llm.csv
+    llm_output_jsonl: data/processed/full_context/tt1591095__full_context_llm.jsonl
+
+  build_candidate_sequences:
+    enabled: true
+    overwrite: true
+    min_duration_sec: 5
+    max_duration_sec: 20
+    min_shots: 3
+    max_shots: 10
+    min_utterances: 2
+    min_speaker_changes: 1
+    min_avg_shot_duration: 1.0
+    min_active_speakers: 1
+    max_active_speakers: 4
+    require_all_shots_dialogue: true
+    allow_unknown_speaker: true
+    select_non_overlapping: true
+    max_sequences: null
+
+  generate_llm_gaze_script:
+    enabled: true
+    overwrite: false
+    max_sequences: 20
+    sequence_id_list: null
+    max_characters_per_sequence: 1
+    cache_responses: true
+    save_prompt: true
+    save_raw_response: true
+    validate_schema: true

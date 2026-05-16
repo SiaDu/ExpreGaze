@@ -1,0 +1,23 @@
+movie:
+  movie_id: tt1637725
+  title: Ted
+  fps: null
+
+files:
+  annotation_file: tt1637725.json
+  meta_file: tt1637725.json
+  script_file: tt1637725.script
+  subtitle_file: tt1637725.srt
+  video_file: tt1637725.mp4
+
+character_map:
+
+  CHAR_A:
+    name: null
+    movienet_pid: null
+    script_aliases: null
+
+  CHAR_B:
+    name: null
+    movienet_pid: null
+    script_aliases: null

@@ -1,0 +1,122 @@
+run:
+  id: video_proxy_tt0032138
+  description: "Video-to-proxy gaze script pipeline for selected tt0032138 candidate sequences"
+  movie_config: configs/tt0032138.yaml
+
+inputs:
+  base_config: configs/base.yaml
+  paths_config: configs/path_local.yaml
+
+data:
+  movie_id: tt0032138
+
+inputs_from_text_pipeline:
+  candidate_sequences_jsonl: data/processed/candidate_sequences/tt0032138__candidate_sequences.jsonl
+  full_context_jsonl: data/processed/full_context/tt0032138__full_context.jsonl
+
+selection:
+  mode: top
+  sequence_ids: null
+  stage_type_include:
+    - single_speaking
+    - two_person_dialogue_simple
+
+outputs:
+  root: outputs/video_proxy/tt0032138
+
+  sequence_video_dir: outputs/video_proxy/tt0032138/sequence_videos
+  shot_clip_dir: outputs/video_proxy/tt0032138/shot_clips
+  face_crop_dir: outputs/video_proxy/tt0032138/face_crops
+  openface_dir: outputs/video_proxy/tt0032138/openface
+  face_track_dir: outputs/video_proxy/tt0032138/face_tracks
+  proxy_gaze_dir: outputs/video_proxy/tt0032138/proxy_gaze_scripts
+  track_identity_dir: outputs/video_proxy/tt0032138/track_identities
+  final_proxy_dir: outputs/video_proxy/tt0032138/final_proxy
+  logs_dir: outputs/video_proxy/tt0032138/logs
+
+stages:
+  extract_video_sequences:
+    enabled: true
+    overwrite: false
+    padding_sec: 0.2
+    max_sequences: null
+    sequence_id_list: null
+
+  split_shot_clips:
+    enabled: true
+    overwrite: false
+
+  detect_and_crop_faces:
+    enabled: true
+    overwrite: false
+    detector: yunet
+    yunet_model_path: models/face_detection/face_detection_yunet_2023mar.onnx
+    sample_fps: 5
+    score_threshold: 0.6
+    nms_threshold: 0.3
+    resize_max: 960
+    save_debug_overlays: true
+    face_crop_margin: 0.25
+    min_face_size_px: 40
+
+  build_face_tracks:
+    enabled: true
+    overwrite: true
+    track_iou_threshold: 0.3
+    center_distance_max_frac: 0.20
+    max_gap_frames: 3
+    min_track_length_frames: 3
+
+  run_openface_per_face:
+    enabled: true
+    overwrite: false
+    crop_margin: 0.35
+    track_time_padding_sec: 0.25
+    min_track_length_frames: 3
+    min_track_conf: 0.6
+    timebin_sec: 0.5
+    openface_binary: /home/sdu/Desktop/OpenFace/OpenFace/build/bin/FeatureExtraction
+    save_aligned_faces: false
+    openface_aus: true
+    expression_proxy: true
+    per_face_crop: true
+    openface_2d_landmarks: true
+    openface_3d_landmarks: true
+    openface_pose: true
+
+  build_proxy_gaze_script:
+    enabled: true
+    overwrite: true
+    direction_threshold: 0.20
+    pose_direction_threshold: 0.25
+    min_proxy_score: 0.55
+    ambiguous_margin: 0.10
+    require_gaze_quality: true
+    include_offscreen_participants: true
+    include_current_speaker: true
+    high_precision: true
+    min_openface_confidence: 0.8
+    smooth_window: 5
+    target_classes:
+      - LOOK_AT_VISIBLE_CHARACTER
+      - LOOK_OFFSCREEN
+      - LOOK_DOWN
+      - LOOK_LEFT
+      - LOOK_RIGHT
+      - UNCERTAIN
+
+  build_track_identities:
+    enabled: true
+    overwrite: true
+    min_body_match_score: 0.55
+    single_speaker_track_confidence: 0.58
+    enable_sface_gallery: true
+    sface_model_path: models/face_recognition/face_recognition_sface.onnx
+    sface_match_threshold: 0.62
+    sface_match_margin: 0.08
+    sface_min_track_confidence: 0.60
+    sface_max_crops_per_track: 5
+
+  build_final_proxy_table:
+    enabled: true
+    overwrite: true
