@@ -280,6 +280,7 @@ dependencies = [
     { name = "imageio-ffmpeg", marker = "sys_platform == 'linux'" },
     { name = "ipykernel", marker = "sys_platform == 'linux'" },
     { name = "jupyter", marker = "sys_platform == 'linux'" },
+    { name = "l2cs", marker = "sys_platform == 'linux'" },
     { name = "matplotlib", marker = "sys_platform == 'linux'" },
     { name = "notebook", marker = "sys_platform == 'linux'" },
     { name = "numpy", marker = "sys_platform == 'linux'" },
@@ -303,6 +304,7 @@ requires-dist = [
     { name = "imageio-ffmpeg", specifier = ">=0.6.0" },
     { name = "ipykernel", specifier = ">=7.2.0" },
     { name = "jupyter", specifier = ">=1.1.1" },
+    { name = "l2cs", editable = "models/gaze_estimation/L2CS-Net" },
     { name = "matplotlib", specifier = ">=3.10.0" },
     { name = "notebook", specifier = ">=7.5.6" },
     { name = "numpy", specifier = ">=2.0.0" },
@@ -315,10 +317,8 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0.0" },
     { name = "requests", specifier = ">=2.34.2" },
     { name = "scipy", specifier = ">=1.14.0" },
-    { name = "torch", marker = "sys_platform != 'linux'", specifier = "==2.5.1" },
-    { name = "torch", marker = "sys_platform == 'linux'", specifier = "==2.5.1", index = "https://download.pytorch.org/whl/cu121" },
-    { name = "torchvision", marker = "sys_platform != 'linux'", specifier = "==0.20.1" },
-    { name = "torchvision", marker = "sys_platform == 'linux'", specifier = "==0.20.1", index = "https://download.pytorch.org/whl/cu121" },
+    { name = "torch", specifier = "==2.5.1", index = "https://download.pytorch.org/whl/cu121" },
+    { name = "torchvision", specifier = "==0.20.1", index = "https://download.pytorch.org/whl/cu121" },
     { name = "tqdm", specifier = ">=4.67.0" },
 ]
 
@@ -875,10 +875,8 @@ requires-dist = [
     { name = "pandas", specifier = ">=1.1.5" },
     { name = "pillow", specifier = ">=8.4.0" },
     { name = "scipy", specifier = ">=1.5.4" },
-    { name = "torch", marker = "sys_platform != 'linux'", specifier = ">=1.10.1" },
-    { name = "torch", marker = "sys_platform == 'linux'", specifier = ">=1.10.1", index = "https://download.pytorch.org/whl/cu121" },
-    { name = "torchvision", marker = "sys_platform != 'linux'", specifier = ">=0.11.2" },
-    { name = "torchvision", marker = "sys_platform == 'linux'", specifier = ">=0.11.2", index = "https://download.pytorch.org/whl/cu121" },
+    { name = "torch", specifier = ">=1.10.1", index = "https://download.pytorch.org/whl/cu121" },
+    { name = "torchvision", specifier = ">=0.11.2", index = "https://download.pytorch.org/whl/cu121" },
 ]
 
 [[package]]

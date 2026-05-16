@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "imageio>=2.37.0",
+    "l2cs",
     "imageio-ffmpeg>=0.6.0",
     "ipykernel>=7.2.0",
     "jupyter>=1.1.1",
@@ -31,21 +32,17 @@ environments = [
     "sys_platform == 'linux' and python_version >= '3.12' and python_version < '3.13'",
 ]
 
-[tool.uv.workspace]
-members = [
-    "models/gaze_estimation/L2CS-Net",
-]
-
 [[tool.uv.index]]
 name = "pytorch-cu121"
 url = "https://download.pytorch.org/whl/cu121"
 explicit = true
 
+[tool.uv.workspace]
+members = [
+    "models/gaze_estimation/L2CS-Net",
+]
+
 [tool.uv.sources]
-torch = [
-    { index = "pytorch-cu121", marker = "sys_platform == 'linux'" },
-]
-torchvision = [
-    { index = "pytorch-cu121", marker = "sys_platform == 'linux'" },
-]
 l2cs = { workspace = true, editable = true }
+torch = { index = "pytorch-cu121" }
+torchvision = { index = "pytorch-cu121" }
