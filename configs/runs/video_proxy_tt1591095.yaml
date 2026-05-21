@@ -30,6 +30,7 @@ outputs:
   openface_dir: outputs/video_proxy/tt1591095/openface
   face_track_dir: outputs/video_proxy/tt1591095/face_tracks
   proxy_gaze_dir: outputs/video_proxy/tt1591095/proxy_gaze_scripts
+  gaze_event_dir: outputs/video_proxy/tt1591095/gaze_events
   track_identity_dir: outputs/video_proxy/tt1591095/track_identities
   final_proxy_dir: outputs/video_proxy/tt1591095/final_proxy
   logs_dir: outputs/video_proxy/tt1591095/logs
@@ -104,6 +105,14 @@ stages:
       - LOOK_LEFT
       - LOOK_RIGHT
       - UNCERTAIN
+
+  build_gaze_events:
+    enabled: true
+    overwrite: true
+    min_event_duration_sec: 1.0
+    min_event_score: 0.55
+    ambiguous_margin: 0.10
+    identity_confidence_threshold: 0.60
 
   build_track_identities:
     enabled: true

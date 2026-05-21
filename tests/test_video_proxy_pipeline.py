@@ -9,6 +9,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from expregaze.video_proxy.build_final_proxy_table import Stage09Config, run as run_stage09
+from expregaze.video_proxy.build_gaze_events import (
+    Stage08bConfig,
+    build_events,
+    build_shot_contexts,
+    segment_events,
+)
 from expregaze.video_proxy.build_proxy_gaze_script import (
     Stage08Config,
     build_assignments,
@@ -209,6 +215,7 @@ class VideoProxyPipelineTests(unittest.TestCase):
         script = Path("scripts/pipelines/run_video_proxy.sh").read_text(encoding="utf-8")
         self.assertIn("07_build_track_identities.sh", script)
         self.assertIn("08_build_proxy_gaze_script.sh", script)
+        self.assertIn("08b_build_gaze_events.sh", script)
         self.assertNotIn("--mode pre", script)
         self.assertNotIn("--mode post", script)
 
@@ -481,6 +488,128 @@ class VideoProxyPipelineTests(unittest.TestCase):
         self.assertEqual(contaminated[0]["failure_reason"], "crop_multi_face_contaminated")
         self.assertEqual(contaminated[0]["smoothing_applied"], "0")
 
+    def test_stage08b_shot_context_and_event_segmentation(self) -> None:
+        manifest = [
+            {"movie_id": "tt", "sequence_id": "seq", "shot_id": "shot_0001", "shot_idx": "1", "aligned_speakers": json.dumps(["A"])},
+            {"movie_id": "tt", "sequence_id": "seq", "shot_id": "shot_0002", "shot_idx": "2", "aligned_speakers": json.dumps(["B"])},
+            {"movie_id": "tt", "sequence_id": "seq", "shot_id": "shot_0003", "shot_idx": "3", "aligned_speakers": json.dumps(["A"])},
+        ]
+        identities = [
+            {"shot_id": "shot_0001", "local_track_id": "trk_000", "cast_pid": "A", "global_person_id": "pid:A", "identity_confidence": "0.9"},
+            {"shot_id": "shot_0002", "local_track_id": "trk_000", "cast_pid": "A", "global_person_id": "pid:A", "identity_confidence": "0.9"},
+            {"shot_id": "shot_0003", "local_track_id": "trk_000", "cast_pid": "A", "global_person_id": "pid:A", "identity_confidence": "0.9"},
+            {"shot_id": "shot_0003", "local_track_id": "trk_001", "cast_pid": "B", "global_person_id": "pid:B", "identity_confidence": "0.9"},
+        ]
+        contexts = build_shot_contexts(manifest, identities, {"seq": {"active_speakers": ["A", "B"]}})
+        by_shot = {row["shot_id"]: row for row in contexts}
+        self.assertEqual(by_shot["shot_0002"]["is_single_closeup"], "1")
+        self.assertEqual(by_shot["shot_0002"]["is_reaction_shot"], "1")
+        self.assertEqual(by_shot["shot_0003"]["is_two_person_shot"], "1")
+        self.assertEqual(by_shot["shot_0002"]["likely_interlocutor"], "B")
+
+        assignments = [
+            {
+                "movie_id": "tt",
+                "sequence_id": "seq",
+                "shot_id": "shot_0001",
+                "local_track_id": "trk_000",
+                "bin_idx": str(idx),
+                "bin_start_sec": str(idx * 0.5),
+                "bin_end_sec": str((idx + 1) * 0.5),
+                "gaze_direction_bucket": direction,
+                "pose_direction_bucket": direction,
+                "gaze_quality": quality,
+                "proxy_status": status,
+                "target_type": "offscreen_participant",
+                "target_id": "B",
+            }
+            for idx, (direction, quality, status) in enumerate(
+                [
+                    ("left", "gaze_reliable", "assigned"),
+                    ("left", "unknown", "unknown"),
+                    ("left", "gaze_reliable", "assigned"),
+                    ("right", "gaze_reliable", "assigned"),
+                ]
+            )
+        ]
+        segmented = segment_events(assignments, min_duration_sec=1.0)
+        groups = segmented[("seq", "shot_0001", "trk_000")]
+        self.assertEqual(len(groups), 2)
+        self.assertEqual([row["bin_idx"] for row in groups[0]], ["0", "1", "2"])
+        self.assertEqual([row["bin_idx"] for row in groups[1]], ["3"])
+
+    def test_stage08b_event_assignment_and_stage09_overlay(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = Stage08bConfig(
+                movie_id="tt",
+                timebins_csv=root / "timebins.csv",
+                shot_manifest_csv=root / "manifest.csv",
+                candidate_sequences_jsonl=root / "seq.jsonl",
+                track_identity_csv=root / "identity.csv",
+                assignments_csv=root / "assignments.csv",
+                candidate_targets_csv=root / "candidates.csv",
+                gaze_event_dir=root / "events",
+                logs_dir=root / "logs",
+                min_event_duration_sec=1.0,
+                min_event_score=0.55,
+                ambiguous_margin=0.10,
+                identity_confidence_threshold=0.60,
+                stage_type_include={"single_speaking", "two_person_dialogue_simple"},
+                overwrite=True,
+            )
+            assignments = [
+                {
+                    "movie_id": "tt",
+                    "sequence_id": "seq",
+                    "shot_id": "shot_0001",
+                    "local_track_id": "trk_000",
+                    "bin_idx": str(idx),
+                    "bin_start_sec": str(idx * 0.5),
+                    "bin_end_sec": str((idx + 1) * 0.5),
+                    "gaze_direction_bucket": "left",
+                    "pose_direction_bucket": "left",
+                    "gaze_quality": "gaze_reliable",
+                    "proxy_status": "assigned",
+                    "target_type": "offscreen_place_or_away",
+                    "target_id": "offscreen_place_or_away",
+                }
+                for idx in range(3)
+            ]
+            candidates = [
+                {
+                    "movie_id": "tt",
+                    "sequence_id": "seq",
+                    "shot_id": "shot_0001",
+                    "subject_local_track_id": "trk_000",
+                    "bin_idx": str(idx),
+                    "candidate_type": "offscreen_participant",
+                    "candidate_id": "B",
+                    "candidate_global_person_id": "pid:B",
+                    "candidate_cast_pid": "B",
+                    "total_score": "0.62",
+                }
+                for idx in range(3)
+            ]
+            identities = [
+                {"shot_id": "shot_0001", "local_track_id": "trk_000", "cast_pid": "A", "global_person_id": "pid:A", "identity_confidence": "0.9"}
+            ]
+            contexts = [
+                {
+                    "sequence_id": "seq",
+                    "shot_id": "shot_0001",
+                    "is_reaction_shot": "1",
+                    "is_two_person_shot": "0",
+                    "likely_interlocutor": "B",
+                    "active_participants": json.dumps(["A", "B"]),
+                }
+            ]
+            events, event_bins = build_events(assignments, candidates, identities, contexts, config)
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["event_status"], "assigned")
+            self.assertEqual(events[0]["candidate_target_id"], "B")
+            self.assertEqual(len(event_bins), 3)
+
     def test_stage09_final_table_preserves_subject_bin(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -490,6 +619,8 @@ class VideoProxyPipelineTests(unittest.TestCase):
             identities = root / "identity.csv"
             candidates = root / "candidates.csv"
             assignments = root / "assignments.csv"
+            events = root / "events.csv"
+            event_bins = root / "event_bins.csv"
             out_dir = root / "final"
             logs_dir = root / "logs"
 
@@ -619,6 +750,55 @@ class VideoProxyPipelineTests(unittest.TestCase):
                     "score_margin",
                 ],
             )
+            write_csv(
+                events,
+                [
+                    {
+                        "movie_id": "tt",
+                        "sequence_id": "seq",
+                        "shot_id": "shot_0001",
+                        "event_id": "shot_0001__trk_000__ev_000",
+                        "event_start": "0.000",
+                        "event_end": "0.500",
+                        "event_status": "assigned",
+                        "event_confidence": "0.750000",
+                    }
+                ],
+                ["movie_id", "sequence_id", "shot_id", "event_id", "event_start", "event_end", "event_status", "event_confidence"],
+            )
+            write_csv(
+                event_bins,
+                [
+                    {
+                        "movie_id": "tt",
+                        "sequence_id": "seq",
+                        "shot_id": "shot_0001",
+                        "subject_local_track_id": "trk_000",
+                        "bin_idx": "0",
+                        "event_id": "shot_0001__trk_000__ev_000",
+                        "event_status": "assigned",
+                        "event_target_type": "offscreen_participant",
+                        "event_target_id": "B",
+                        "event_target_global_person_id": "pid:B",
+                        "event_confidence": "0.750000",
+                        "event_failure_reason": "assigned",
+                    }
+                ],
+                [
+                    "movie_id",
+                    "sequence_id",
+                    "shot_id",
+                    "subject_local_track_id",
+                    "bin_idx",
+                    "event_id",
+                    "event_status",
+                    "event_target_type",
+                    "event_target_id",
+                    "event_target_global_person_id",
+                    "event_confidence",
+                    "event_failure_reason",
+                ],
+            )
             config = Stage09Config(
                 movie_id="tt",
                 shot_manifest_csv=manifest,
@@ -631,6 +811,8 @@ class VideoProxyPipelineTests(unittest.TestCase):
                 logs_dir=logs_dir,
                 stage_type_include={"single_speaking", "two_person_dialogue_simple"},
                 overwrite=True,
+                gaze_events_csv=events,
+                gaze_event_bins_csv=event_bins,
             )
             run_stage09(config)
             rows = read_csv(out_dir / "09_final_proxy_table.csv")
@@ -638,6 +820,11 @@ class VideoProxyPipelineTests(unittest.TestCase):
             self.assertEqual(rows[0]["subject_global_person_id"], "pid:nm1")
             self.assertEqual(rows[0]["proxy_status"], "assigned")
             self.assertEqual(rows[0]["failure_reason"], "assigned")
+            self.assertEqual(rows[0]["target_type"], "offscreen_participant")
+            self.assertEqual(rows[0]["target_id"], "B")
+            self.assertEqual(rows[0]["target_global_person_id"], "pid:B")
+            self.assertEqual(rows[0]["proxy_confidence"], "0.750000")
+            self.assertEqual(rows[0]["event_id"], "shot_0001__trk_000__ev_000")
             self.assertEqual(rows[0]["identity_status"], "unknown")
             self.assertEqual(rows[0]["has_offscreen_person_candidate"], "0")
             self.assertIn("offscreen_place_or_away", rows[0]["candidate_list"])

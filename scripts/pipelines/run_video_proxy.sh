@@ -28,6 +28,9 @@ bash scripts/stages/07_build_track_identities.sh "$RUN_CONFIG" "${EXTRA_ARGS[@]}
 echo "[video_proxy] Stage08: identity-aware proxy gaze assignment"
 bash scripts/stages/08_build_proxy_gaze_script.sh "$RUN_CONFIG" "${EXTRA_ARGS[@]}"
 
+echo "[video_proxy] Stage08b: event-level temporal gaze smoothing"
+bash scripts/stages/08b_build_gaze_events.sh "$RUN_CONFIG" "${EXTRA_ARGS[@]}"
+
 echo "[video_proxy] Stage09: build final proxy table"
 bash scripts/stages/09_build_final_proxy_table.sh "$RUN_CONFIG" "${EXTRA_ARGS[@]}"
 

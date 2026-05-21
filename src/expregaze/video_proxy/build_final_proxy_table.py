@@ -55,6 +55,14 @@ FINAL_COLUMNS = [
     "proxy_status",
     "proxy_source",
     "failure_reason",
+    "event_id",
+    "event_start",
+    "event_end",
+    "event_status",
+    "event_confidence",
+    "event_target_type",
+    "event_target_id",
+    "event_target_global_person_id",
     "top_score",
     "second_score",
     "score_margin",
@@ -74,6 +82,8 @@ class Stage09Config:
     logs_dir: Path
     stage_type_include: set[str] | None
     overwrite: bool
+    gaze_events_csv: Path | None = None
+    gaze_event_bins_csv: Path | None = None
 
     @property
     def final_proxy_csv(self) -> Path:
@@ -136,6 +146,7 @@ def make_config(args: argparse.Namespace) -> Stage09Config:
         outputs.get("track_identity_dir") or f"outputs/video_proxy/{movie_id}/track_identities", project_root
     )
     proxy_gaze_dir = resolve_path(outputs.get("proxy_gaze_dir") or f"outputs/video_proxy/{movie_id}/proxy_gaze_scripts", project_root)
+    gaze_event_dir = resolve_path(outputs.get("gaze_event_dir") or f"outputs/video_proxy/{movie_id}/gaze_events", project_root)
     final_proxy_dir = resolve_path(
         args.final_proxy_dir or outputs.get("final_proxy_dir") or f"outputs/video_proxy/{movie_id}/final_proxy",
         project_root,
@@ -146,6 +157,7 @@ def make_config(args: argparse.Namespace) -> Stage09Config:
         and face_track_dir is not None
         and identity_dir is not None
         and proxy_gaze_dir is not None
+        and gaze_event_dir is not None
         and final_proxy_dir is not None
     )
 
@@ -162,6 +174,8 @@ def make_config(args: argparse.Namespace) -> Stage09Config:
         logs_dir=logs_dir,
         stage_type_include=resolve_stage_type_include(args.stage_type_include, selection.get("stage_type_include")),
         overwrite=bool(args.overwrite or stage.get("overwrite", False)),
+        gaze_events_csv=resolve_path(args.gaze_events_csv, project_root) or gaze_event_dir / "08b_gaze_events.csv",
+        gaze_event_bins_csv=resolve_path(args.gaze_event_bins_csv, project_root) or gaze_event_dir / "08b_gaze_event_bins.csv",
     )
 
 
@@ -277,6 +291,25 @@ def build_candidate_summaries(candidates: list[dict[str, str]]) -> dict[tuple[st
     return summaries
 
 
+def build_event_lookup(
+    event_bins: list[dict[str, str]],
+    events: list[dict[str, str]],
+) -> dict[tuple[str, str, str, str], dict[str, str]]:
+    event_by_id = {row.get("event_id", ""): row for row in events}
+    lookup: dict[tuple[str, str, str, str], dict[str, str]] = {}
+    for row in event_bins:
+        event = event_by_id.get(row.get("event_id", ""), {})
+        lookup[
+            (
+                row.get("sequence_id", ""),
+                row.get("shot_id", ""),
+                row.get("subject_local_track_id", ""),
+                row.get("bin_idx", ""),
+            )
+        ] = {**event, **row}
+    return lookup
+
+
 def ensure_inputs(config: Stage09Config) -> None:
     for path in [
         config.shot_manifest_csv,
@@ -320,6 +353,24 @@ def run(config: Stage09Config) -> None:
         for row in read_csv(config.assignments_csv)
         if row.get("movie_id") == config.movie_id and row.get("shot_id", "") in allowed_shots
     ]
+    event_rows = (
+        [
+            row
+            for row in read_csv(config.gaze_events_csv)
+            if row.get("movie_id") == config.movie_id and row.get("shot_id", "") in allowed_shots
+        ]
+        if config.gaze_events_csv is not None and config.gaze_events_csv.exists()
+        else []
+    )
+    event_bin_rows = (
+        [
+            row
+            for row in read_csv(config.gaze_event_bins_csv)
+            if row.get("movie_id") == config.movie_id and row.get("shot_id", "") in allowed_shots
+        ]
+        if config.gaze_event_bins_csv is not None and config.gaze_event_bins_csv.exists()
+        else []
+    )
 
     identity_lookup = {(row.get("shot_id", ""), row.get("local_track_id", "")): row for row in identities}
     assignment_lookup = {key4(row): row for row in assignments}
@@ -327,12 +378,14 @@ def run(config: Stage09Config) -> None:
     track_conf_lookup = build_track_conf_lookup(face_tracks)
     candidate_lists = build_candidate_lists(candidates)
     candidate_summaries = build_candidate_summaries(candidates)
+    event_lookup = build_event_lookup(event_bin_rows, event_rows)
 
     final_rows: list[dict[str, Any]] = []
     for tb in sorted(timebins, key=lambda row: (row.get("sequence_id", ""), row.get("shot_idx", ""), row.get("local_track_id", ""), safe_float(row.get("bin_start_sec")))):
         key = key4(tb)
         identity = identity_lookup.get((tb.get("shot_id", ""), tb.get("local_track_id", "")), {})
         assignment = assignment_lookup.get(key, {})
+        event = event_lookup.get(key, {})
         manifest = manifest_lookup.get(tb.get("shot_id", ""), {})
         candidate_summary = candidate_summaries.get(
             key,
@@ -343,6 +396,22 @@ def run(config: Stage09Config) -> None:
                 "current_speaker_available": "0",
             },
         )
+        target_type = assignment.get("target_type", "unknown")
+        target_id = assignment.get("target_id", "unknown")
+        target_global_person_id = assignment.get("target_global_person_id", "")
+        proxy_confidence = assignment.get("proxy_confidence", "0.000000")
+        proxy_status = assignment.get("proxy_status", "unknown")
+        proxy_source = assignment.get("proxy_source", "")
+        failure_reason = assignment.get("failure_reason", "missing_assignment")
+        if event:
+            target_type = event.get("event_target_type", target_type)
+            target_id = event.get("event_target_id", target_id)
+            target_global_person_id = event.get("event_target_global_person_id", target_global_person_id)
+            proxy_confidence = event.get("event_confidence", proxy_confidence)
+            proxy_status = event.get("event_status", proxy_status)
+            proxy_source = f"{proxy_source}+event_level" if proxy_source else "event_level"
+            failure_reason = event.get("event_failure_reason", failure_reason)
+
         final_rows.append(
             {
                 "movie_id": tb.get("movie_id", ""),
@@ -371,13 +440,21 @@ def run(config: Stage09Config) -> None:
                 "has_offscreen_person_candidate": candidate_summary["has_offscreen_person_candidate"],
                 "current_speaker_available": candidate_summary["current_speaker_available"],
                 "candidate_list": candidate_lists.get(key, "[]"),
-                "target_type": assignment.get("target_type", "unknown"),
-                "target_id": assignment.get("target_id", "unknown"),
-                "target_global_person_id": assignment.get("target_global_person_id", ""),
-                "proxy_confidence": assignment.get("proxy_confidence", "0.000000"),
-                "proxy_status": assignment.get("proxy_status", "unknown"),
-                "proxy_source": assignment.get("proxy_source", ""),
-                "failure_reason": assignment.get("failure_reason", "missing_assignment"),
+                "target_type": target_type,
+                "target_id": target_id,
+                "target_global_person_id": target_global_person_id,
+                "proxy_confidence": proxy_confidence,
+                "proxy_status": proxy_status,
+                "proxy_source": proxy_source,
+                "failure_reason": failure_reason,
+                "event_id": event.get("event_id", ""),
+                "event_start": event.get("event_start", ""),
+                "event_end": event.get("event_end", ""),
+                "event_status": event.get("event_status", ""),
+                "event_confidence": event.get("event_confidence", ""),
+                "event_target_type": event.get("event_target_type", ""),
+                "event_target_id": event.get("event_target_id", ""),
+                "event_target_global_person_id": event.get("event_target_global_person_id", ""),
                 "top_score": assignment.get("top_score", "0.000000"),
                 "second_score": assignment.get("second_score", "0.000000"),
                 "score_margin": assignment.get("score_margin", "0.000000"),
@@ -396,6 +473,9 @@ def run(config: Stage09Config) -> None:
         "target_type_counts": dict(Counter(row.get("target_type", "") for row in final_rows)),
         "proxy_status_counts": dict(Counter(row.get("proxy_status", "") for row in final_rows)),
         "failure_reason_counts": dict(Counter(row.get("failure_reason", "") for row in final_rows)),
+        "event_row_count": len(event_rows),
+        "event_bin_row_count": len(event_bin_rows),
+        "event_overlay_applied_count": sum(1 for row in final_rows if row.get("event_id")),
         "outputs": {
             "final_proxy_csv": str(config.final_proxy_csv),
             "final_proxy_jsonl": str(config.final_proxy_jsonl),
@@ -424,6 +504,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--track-identity-csv")
     parser.add_argument("--candidate-targets-csv")
     parser.add_argument("--assignments-csv")
+    parser.add_argument("--gaze-events-csv")
+    parser.add_argument("--gaze-event-bins-csv")
     parser.add_argument("--final-proxy-dir")
     parser.add_argument("--stage-type-include", help="Comma list of stage_type values to process, or 'all'.")
     parser.add_argument("--no-sface-gallery", action="store_true", help=argparse.SUPPRESS)
