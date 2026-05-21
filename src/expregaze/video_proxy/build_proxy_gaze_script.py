@@ -437,6 +437,8 @@ def score_candidate(
     elif gaze_quality == "pose_fallback":
         quality_score += 0.05
         uncertainty_penalty += 0.05
+    elif gaze_quality == "crop_multi_face_contaminated":
+        uncertainty_penalty += 1.0
     elif gaze_quality == "unknown":
         uncertainty_penalty += 0.5
 
@@ -784,7 +786,9 @@ def build_assignments(
         proxy_status = "unknown"
         failure_reason = "no_candidate"
         proxy_source = "openface_rule"
-        if config.require_gaze_quality and tb.get("gaze_quality") == "unknown":
+        if config.require_gaze_quality and tb.get("gaze_quality") == "crop_multi_face_contaminated":
+            failure_reason = "crop_multi_face_contaminated"
+        elif config.require_gaze_quality and tb.get("gaze_quality") == "unknown":
             failure_reason = "gaze_quality_unknown"
         elif top is None:
             failure_reason = "no_candidate"

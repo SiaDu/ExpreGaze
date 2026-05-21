@@ -52,12 +52,12 @@ stages:
     detector: yunet
     yunet_model_path: models/face_detection/face_detection_yunet_2023mar.onnx
     sample_fps: 5
-    score_threshold: 0.6
+    score_threshold: 0.75
     nms_threshold: 0.3
     resize_max: 960
     save_debug_overlays: true
     face_crop_margin: 0.25
-    min_face_size_px: 40
+    min_face_size_px: 60
 
   build_face_tracks:
     enabled: true
@@ -70,8 +70,8 @@ stages:
   run_openface_per_face:
     enabled: true
     overwrite: false
-    crop_margin: 0.35
-    track_time_padding_sec: 0.25
+    crop_margin: 0.20
+    track_time_padding_sec: 0.10
     min_track_length_frames: 3
     min_track_conf: 0.6
     timebin_sec: 0.5

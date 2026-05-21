@@ -19,7 +19,7 @@ bash scripts/stages/04_extract_video_sequences.sh "$RUN_CONFIG" "${EXTRA_ARGS[@]
 echo "[video_proxy] Stage05: face detection and shot-local tracking"
 bash scripts/stages/05_run_face_detection_tracks.sh "$RUN_CONFIG" "${EXTRA_ARGS[@]}"
 
-echo "[video_proxy] Stage06: per-track OpenFace and gaze timebins"
+echo "[video_proxy] Stage06: OpenFace quality + L2CS/6D gaze evidence"
 bash scripts/stages/06_run_openface_per_face.sh "$RUN_CONFIG" "${EXTRA_ARGS[@]}"
 
 echo "[video_proxy] Stage07: build track identities"

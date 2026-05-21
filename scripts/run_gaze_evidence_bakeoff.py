@@ -10,6 +10,7 @@ import importlib.util
 import json
 import math
 import os
+import subprocess
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -17,6 +18,10 @@ from typing import Any
 
 
 MOVIES = ["tt0032138", "tt1591095", "tt1637725"]
+GAZE_CENTER_THRESHOLD = 0.20
+GAZE_STRONG_THRESHOLD = 0.50
+POSE_CENTER_THRESHOLD = 0.25
+POSE_STRONG_THRESHOLD = 0.60
 OUTPUT_COLUMNS = [
     "movie_id",
     "sample_bucket",
@@ -25,6 +30,7 @@ OUTPUT_COLUMNS = [
     "shot_id",
     "bin_idx",
     "subject_track_id",
+    "image_path",
     "crop_video_path",
     "overlay_path",
     "openface_vis_path",
@@ -36,16 +42,22 @@ OUTPUT_COLUMNS = [
     "openface_gaze_y",
     "openface_pose_Ry",
     "openface_pose_Rx",
+    "openface_gaze_direction_old",
+    "openface_pose_direction_old",
     "openface_gaze_direction",
     "openface_pose_direction",
     "openface_conflict",
     "l2cs_yaw",
     "l2cs_pitch",
+    "l2cs_direction_old",
     "l2cs_direction",
+    "l2cs_vertical_direction",
     "sixd_yaw",
     "sixd_pitch",
     "sixd_roll",
+    "sixd_pose_direction_old",
     "sixd_pose_direction",
+    "openface_gaze_vs_sixd_head_agree",
     "l2cs_vs_openface_gaze_agree",
     "sixd_vs_openface_pose_agree",
     "inference_status",
@@ -101,6 +113,42 @@ def direction_bucket(value: Any, threshold: float) -> str:
     return "center"
 
 
+def screen_direction_bucket(value: Any, center_threshold: float, strong_threshold: float, invert: bool = False) -> str:
+    parsed = safe_float(value)
+    if math.isnan(parsed):
+        return "unknown"
+    magnitude = abs(parsed)
+    if magnitude < center_threshold:
+        return "center"
+    side = "screen_left" if parsed > 0 else "screen_right"
+    if invert:
+        side = "screen_right" if parsed > 0 else "screen_left"
+    strength = "strong" if magnitude >= strong_threshold else "weak"
+    return f"{strength}_{side}"
+
+
+def screen_vertical_bucket(value: Any, center_threshold: float, strong_threshold: float) -> str:
+    parsed = safe_float(value)
+    if math.isnan(parsed):
+        return "unknown"
+    magnitude = abs(parsed)
+    if magnitude < center_threshold:
+        return "center"
+    side = "screen_up" if parsed > 0 else "screen_down"
+    strength = "strong" if magnitude >= strong_threshold else "weak"
+    return f"{strength}_{side}"
+
+
+def bucket_side(bucket: str) -> str:
+    if "screen_left" in bucket or bucket.endswith("left") or bucket == "left":
+        return "screen_left"
+    if "screen_right" in bucket or bucket.endswith("right") or bucket == "right":
+        return "screen_right"
+    if bucket == "center":
+        return "center"
+    return "unknown"
+
+
 def key4(row: dict[str, str], track_col: str) -> tuple[str, str, str, str]:
     return (
         row.get("movie_id", ""),
@@ -121,7 +169,9 @@ def sample_key(row: dict[str, str]) -> tuple[str, str, str, str, str]:
 
 
 def gaze_pose_conflict(gaze_direction: str, pose_direction: str) -> str:
-    if gaze_direction in {"left", "right"} and pose_direction in {"left", "right"} and gaze_direction != pose_direction:
+    gaze_side = bucket_side(gaze_direction)
+    pose_side = bucket_side(pose_direction)
+    if gaze_side in {"screen_left", "screen_right"} and pose_side in {"screen_left", "screen_right"} and gaze_side != pose_side:
         return "1"
     return "0"
 
@@ -266,7 +316,7 @@ class L2CSRunner:
         self.prep_input_numpy = prep_input_numpy
         self.device = resolve_device(device_name)
         self.model = getArch("ResNet50", 90)
-        state = torch.load(str(weights), map_location=self.device)
+        state = torch.load(str(weights), map_location=self.device, weights_only=True)
         self.model.load_state_dict(state)
         self.model.to(self.device)
         self.model.eval()
@@ -286,10 +336,15 @@ class L2CSRunner:
             yaw_deg = (self.torch.sum(yaw_pred * self.idx_tensor, dim=1) * 4 - 180).item()
         pitch = math.radians(float(pitch_deg))
         yaw = math.radians(float(yaw_deg))
+        direction_old = direction_bucket(yaw, GAZE_CENTER_THRESHOLD)
+        horizontal_direction = screen_direction_bucket(pitch, GAZE_CENTER_THRESHOLD, GAZE_STRONG_THRESHOLD, invert=False)
+        vertical_direction = screen_vertical_bucket(yaw, GAZE_CENTER_THRESHOLD, GAZE_STRONG_THRESHOLD)
         return {
             "l2cs_yaw": f"{yaw:.6f}",
             "l2cs_pitch": f"{pitch:.6f}",
-            "l2cs_direction": direction_bucket(yaw, 0.20),
+            "l2cs_direction_old": direction_old,
+            "l2cs_direction": horizontal_direction,
+            "l2cs_vertical_direction": vertical_direction,
         }
 
 
@@ -312,7 +367,7 @@ class SixDRepNetRunner:
         self.sixd_utils = sixd_utils
         self.device = resolve_device(device_name)
         self.model = SixDRepNet360(torchvision.models.resnet.Bottleneck, [3, 4, 6, 3], 6)
-        state = torch.load(str(weights), map_location=self.device)
+        state = torch.load(str(weights), map_location=self.device, weights_only=True)
         if isinstance(state, dict) and "model_state_dict" in state:
             state = state["model_state_dict"]
         self.model.load_state_dict(state)
@@ -343,7 +398,8 @@ class SixDRepNetRunner:
             "sixd_yaw": f"{yaw:.6f}",
             "sixd_pitch": f"{pitch:.6f}",
             "sixd_roll": f"{roll:.6f}",
-            "sixd_pose_direction": direction_bucket(yaw, 0.25),
+            "sixd_pose_direction_old": direction_bucket(yaw, POSE_CENTER_THRESHOLD),
+            "sixd_pose_direction": screen_direction_bucket(yaw, POSE_CENTER_THRESHOLD, POSE_STRONG_THRESHOLD, invert=False),
         }
 
 
@@ -507,7 +563,23 @@ def visualization_basename(row_index: int, row: dict[str, Any]) -> str:
     return "_".join(part.replace("/", "_").replace(" ", "_") for part in parts if part)
 
 
-def save_visualizations(row: dict[str, Any], frame: Any, output_dir: Path, row_index: int) -> list[str]:
+def safe_slug(value: str) -> str:
+    safe = []
+    for char in value:
+        if char.isalnum() or char in {"-", "_"}:
+            safe.append(char)
+        else:
+            safe.append("_")
+    return "".join(safe).strip("_") or "item"
+
+
+def save_visualizations(
+    row: dict[str, Any],
+    frame: Any,
+    output_dir: Path,
+    row_index: int,
+    include_openface: bool = True,
+) -> list[str]:
     try:
         import cv2
     except Exception as exc:  # pragma: no cover - environment dependent
@@ -525,32 +597,36 @@ def save_visualizations(row: dict[str, Any], frame: Any, output_dir: Path, row_i
             raise OSError(f"cv2.imwrite failed for {path}")
         return str(path)
 
-    try:
-        openface_image = frame.copy()
-        draw_gaze_arrow(openface_image, row.get("openface_gaze_x"), row.get("openface_gaze_y"), (255, 255, 0))
-        draw_pose_cube_degrees(
-            openface_image,
-            rad_to_deg(row.get("openface_pose_Ry")),
-            rad_to_deg(row.get("openface_pose_Rx")),
-            rad_to_deg(row.get("openface_pose_Rz")),
-            size_scale=0.48,
-        )
-        draw_text_lines(
-            openface_image,
-            [
-                "OpenFace bin mean",
-                f"gaze={row.get('openface_gaze_direction')} pose={row.get('openface_pose_direction')} conflict={row.get('openface_conflict')}",
-            ],
-        )
-        row["openface_vis_path"] = write_image("openface", openface_image)
-    except Exception as exc:  # pragma: no cover - image dependent
-        errors.append(f"openface visualization: {type(exc).__name__}: {exc}")
+    if include_openface:
+        try:
+            openface_image = frame.copy()
+            draw_gaze_arrow(openface_image, row.get("openface_gaze_x"), row.get("openface_gaze_y"), (255, 255, 0))
+            draw_pose_cube_degrees(
+                openface_image,
+                rad_to_deg(row.get("openface_pose_Ry")),
+                rad_to_deg(row.get("openface_pose_Rx")),
+                rad_to_deg(row.get("openface_pose_Rz")),
+                size_scale=0.48,
+            )
+            draw_text_lines(
+                openface_image,
+                [
+                    "OpenFace bin mean",
+                    f"gaze={row.get('openface_gaze_direction')} pose={row.get('openface_pose_direction')} conflict={row.get('openface_conflict')}",
+                ],
+            )
+            row["openface_vis_path"] = write_image("openface", openface_image)
+        except Exception as exc:  # pragma: no cover - image dependent
+            errors.append(f"openface visualization: {type(exc).__name__}: {exc}")
 
     if row.get("l2cs_yaw") and row.get("l2cs_pitch"):
         try:
             l2cs_image = frame.copy()
             draw_gaze_arrow(l2cs_image, row.get("l2cs_pitch"), row.get("l2cs_yaw"), (255, 255, 0))
-            draw_text_lines(l2cs_image, ["L2CS-Net", f"gaze={row.get('l2cs_direction')}"])
+            draw_text_lines(
+                l2cs_image,
+                ["L2CS-Net", f"h={row.get('l2cs_direction')}", f"v={row.get('l2cs_vertical_direction')}"],
+            )
             row["l2cs_vis_path"] = write_image("l2cs", l2cs_image)
         except Exception as exc:  # pragma: no cover - image dependent
             errors.append(f"l2cs visualization: {type(exc).__name__}: {exc}")
@@ -595,17 +671,57 @@ def load_optional_runners(
 
 
 def run_l2cs_placeholder() -> dict[str, str]:
-    return {"l2cs_yaw": "", "l2cs_pitch": "", "l2cs_direction": ""}
+    return {"l2cs_yaw": "", "l2cs_pitch": "", "l2cs_direction_old": "", "l2cs_direction": "", "l2cs_vertical_direction": ""}
 
 
 def run_sixd_placeholder() -> dict[str, str]:
-    return {"sixd_yaw": "", "sixd_pitch": "", "sixd_roll": "", "sixd_pose_direction": ""}
+    return {"sixd_yaw": "", "sixd_pitch": "", "sixd_roll": "", "sixd_pose_direction_old": "", "sixd_pose_direction": ""}
 
 
 def compare_agreement(model_direction: str, openface_direction: str) -> str:
-    if model_direction in {"", "unknown"} or openface_direction in {"", "unknown"}:
+    model_side = bucket_side(model_direction)
+    openface_side = bucket_side(openface_direction)
+    if model_side in {"", "unknown"} or openface_side in {"", "unknown"}:
         return ""
-    return "1" if model_direction == openface_direction else "0"
+    return "1" if model_side == openface_side else "0"
+
+
+def agreement_summary(rows: list[dict[str, Any]], column: str) -> dict[str, Any]:
+    counts = Counter(str(row.get(column, "")) for row in rows if str(row.get(column, "")) in {"0", "1"})
+    total = counts["0"] + counts["1"]
+    return {
+        "agree": counts["1"],
+        "disagree": counts["0"],
+        "total_compared": total,
+        "agree_ratio": (counts["1"] / total) if total else None,
+        "disagree_ratio": (counts["0"] / total) if total else None,
+    }
+
+
+def old_to_new_counts(rows: list[dict[str, Any]], old_column: str, new_column: str) -> dict[str, int]:
+    return dict(Counter(f"{row.get(old_column, '')}->{row.get(new_column, '')}" for row in rows))
+
+
+def direction_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "thresholds": {
+            "gaze_center": GAZE_CENTER_THRESHOLD,
+            "gaze_strong": GAZE_STRONG_THRESHOLD,
+            "pose_center": POSE_CENTER_THRESHOLD,
+            "pose_strong": POSE_STRONG_THRESHOLD,
+        },
+        "openface_gaze_mapping": "gaze_angle_x_mean > center_threshold => screen_left; < -center_threshold => screen_right",
+        "openface_pose_mapping": "pose_Ry_mean < -center_threshold => screen_right; > center_threshold => screen_left",
+        "sixd_head_mapping": "sixd_yaw < -center_threshold => screen_right; > center_threshold => screen_left",
+        "l2cs_mapping": "pitch controls horizontal screen direction; yaw controls vertical screen direction",
+        "openface_gaze_vs_sixd_head": agreement_summary(rows, "openface_gaze_vs_sixd_head_agree"),
+        "old_to_new": {
+            "openface_gaze": old_to_new_counts(rows, "openface_gaze_direction_old", "openface_gaze_direction"),
+            "openface_pose": old_to_new_counts(rows, "openface_pose_direction_old", "openface_pose_direction"),
+            "sixd_head": old_to_new_counts(rows, "sixd_pose_direction_old", "sixd_pose_direction"),
+            "l2cs_yaw_old_to_pitch_horizontal": old_to_new_counts(rows, "l2cs_direction_old", "l2cs_direction"),
+        },
+    }
 
 
 def build_compare_rows(
@@ -645,8 +761,10 @@ def build_compare_rows(
             pose_ry = openface.get("pose_Ry_mean", "")
             pose_rx = openface.get("pose_Rx_mean", "")
             pose_rz = openface.get("pose_Rz_mean", "")
-            openface_gaze = direction_bucket(gaze_x, 0.20)
-            openface_pose = direction_bucket(pose_ry, 0.25)
+            openface_gaze_old = direction_bucket(gaze_x, GAZE_CENTER_THRESHOLD)
+            openface_pose_old = direction_bucket(pose_ry, POSE_CENTER_THRESHOLD)
+            openface_gaze = screen_direction_bucket(gaze_x, GAZE_CENTER_THRESHOLD, GAZE_STRONG_THRESHOLD, invert=False)
+            openface_pose = screen_direction_bucket(pose_ry, POSE_CENTER_THRESHOLD, POSE_STRONG_THRESHOLD, invert=False)
             row: dict[str, Any] = {
                 "movie_id": movie_id,
                 "sample_bucket": sample.get("sample_bucket", ""),
@@ -655,6 +773,7 @@ def build_compare_rows(
                 "shot_id": sample.get("shot_id", ""),
                 "bin_idx": sample.get("bin_idx", ""),
                 "subject_track_id": sample.get("subject_local_track_id", ""),
+                "image_path": "",
                 "crop_video_path": openface.get("crop_video_path", ""),
                 "overlay_path": sample.get("overlay_path", ""),
                 "openface_vis_path": "",
@@ -667,9 +786,12 @@ def build_compare_rows(
                 "openface_pose_Ry": pose_ry,
                 "openface_pose_Rx": pose_rx,
                 "openface_pose_Rz": pose_rz,
+                "openface_gaze_direction_old": openface_gaze_old,
+                "openface_pose_direction_old": openface_pose_old,
                 "openface_gaze_direction": openface_gaze,
                 "openface_pose_direction": openface_pose,
                 "openface_conflict": gaze_pose_conflict(openface_gaze, openface_pose),
+                "openface_gaze_vs_sixd_head_agree": "",
                 "l2cs_vs_openface_gaze_agree": "",
                 "sixd_vs_openface_pose_agree": "",
                 "inference_status": "",
@@ -681,6 +803,9 @@ def build_compare_rows(
             if missing:
                 errors.extend(f"{name}: {dependency_errors.get(name, 'missing')}" for name in missing)
                 row["inference_status"] = "baseline_only"
+            elif l2cs_runner is None and sixd_runner is None:
+                row["inference_status"] = "baseline_only"
+                errors.extend(f"{name}: {message}" for name, message in model_errors.items())
             else:
                 frame, frame_error = read_crop_frame(
                     str(row.get("crop_video_path", "")),
@@ -690,7 +815,7 @@ def build_compare_rows(
                 if frame_error:
                     errors.append(frame_error)
                 if frame is None:
-                    row["inference_status"] = "frame_unavailable"
+                    row["inference_status"] = "baseline_only"
                 else:
                     model_ok = 0
                     if l2cs_runner is not None:
@@ -713,8 +838,9 @@ def build_compare_rows(
                         row["inference_status"] = "baseline_only"
                     errors.extend(save_visualizations(row, frame, output_dir, len(all_rows)))
                 errors.extend(f"{name}: {message}" for name, message in model_errors.items())
-            row["l2cs_vs_openface_gaze_agree"] = compare_agreement(str(row.get("l2cs_direction", "")), openface_gaze)
+            row["l2cs_vs_openface_gaze_agree"] = ""
             row["sixd_vs_openface_pose_agree"] = compare_agreement(str(row.get("sixd_pose_direction", "")), openface_pose)
+            row["openface_gaze_vs_sixd_head_agree"] = compare_agreement(str(row.get("sixd_pose_direction", "")), openface_gaze)
             row["error_note"] = "; ".join(dict.fromkeys(error for error in errors if error))
             all_rows.append(row)
     summary = {
@@ -726,6 +852,7 @@ def build_compare_rows(
         "l2cs_available": l2cs_runner is not None,
         "sixdrepnet_available": sixd_runner is not None,
         "inference_status_counts": dict(Counter(row["inference_status"] for row in all_rows)),
+        "direction_summary": direction_summary(all_rows),
         "visualization_counts": {
             "openface": sum(1 for row in all_rows if row.get("openface_vis_path")),
             "l2cs": sum(1 for row in all_rows if row.get("l2cs_vis_path")),
@@ -737,6 +864,195 @@ def build_compare_rows(
         "output_html": str(output_dir / "gaze_evidence_compare.html"),
     }
     return all_rows, summary
+
+
+def image_files(image_dir: Path) -> list[Path]:
+    extensions = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+    return sorted(path for path in image_dir.iterdir() if path.is_file() and path.suffix.lower() in extensions)
+
+
+def read_image_frame(image_path: Path) -> tuple[Any | None, str]:
+    try:
+        import cv2
+    except Exception as exc:  # pragma: no cover - environment dependent
+        return None, f"cv2 unavailable: {type(exc).__name__}: {exc}"
+    frame = cv2.imread(str(image_path))
+    if frame is None:
+        return None, f"could not read image: {image_path}"
+    return frame, ""
+
+
+def run_openface_image(image_path: Path, output_dir: Path, openface_binary: Path, row_index: int) -> tuple[dict[str, str], str]:
+    if not openface_binary.exists():
+        return {}, f"OpenFace binary not found: {openface_binary}"
+    raw_dir = output_dir / "openface_raw" / f"{row_index:04d}_{safe_slug(image_path.stem)}"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    output_stem = f"{row_index:04d}_{safe_slug(image_path.stem)}"
+    expected_csv = raw_dir / f"{output_stem}.csv"
+    cmd = [
+        str(openface_binary),
+        "-f",
+        str(image_path.resolve()),
+        "-out_dir",
+        str(raw_dir.resolve()),
+        "-of",
+        output_stem,
+        "-gaze",
+        "-pose",
+        "-q",
+    ]
+    cwd = openface_binary.parent.parent if openface_binary.parent.name == "bin" else openface_binary.parent
+    result = subprocess.run(cmd, cwd=cwd, check=False, capture_output=True, text=True)
+    csv_path = expected_csv if expected_csv.exists() else next(iter(sorted(raw_dir.glob("*.csv"))), None)
+    if csv_path is None:
+        note = (result.stderr or result.stdout or "OpenFace did not produce a CSV").strip().replace("\n", " ")
+        return {}, f"OpenFace image inference failed rc={result.returncode}: {note[-800:]}"
+    rows = read_csv(csv_path)
+    if not rows:
+        return {}, f"OpenFace CSV has no rows: {csv_path}"
+    raw = rows[0]
+    out = {
+        "openface_gaze_x": raw.get("gaze_angle_x", ""),
+        "openface_gaze_y": raw.get("gaze_angle_y", ""),
+        "openface_pose_Rx": raw.get("pose_Rx", ""),
+        "openface_pose_Ry": raw.get("pose_Ry", ""),
+        "openface_pose_Rz": raw.get("pose_Rz", ""),
+    }
+    out["openface_gaze_direction_old"] = direction_bucket(out["openface_gaze_x"], GAZE_CENTER_THRESHOLD)
+    out["openface_pose_direction_old"] = direction_bucket(out["openface_pose_Ry"], POSE_CENTER_THRESHOLD)
+    out["openface_gaze_direction"] = screen_direction_bucket(
+        out["openface_gaze_x"], GAZE_CENTER_THRESHOLD, GAZE_STRONG_THRESHOLD, invert=False
+    )
+    out["openface_pose_direction"] = screen_direction_bucket(
+        out["openface_pose_Ry"], POSE_CENTER_THRESHOLD, POSE_STRONG_THRESHOLD, invert=False
+    )
+    out["openface_conflict"] = gaze_pose_conflict(out["openface_gaze_direction"], out["openface_pose_direction"])
+    note = "" if result.returncode == 0 else f"OpenFace returned rc={result.returncode} but produced CSV"
+    return out, note
+
+
+def build_image_rows(
+    image_dir: Path,
+    output_dir: Path,
+    l2cs_repo: Path,
+    l2cs_weights: Path,
+    sixd_repo: Path,
+    sixd_weights: Path,
+    openface_binary: Path,
+    device: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    deps, missing, dependency_errors = dependency_status()
+    model_errors: dict[str, str] = {}
+    l2cs_runner: L2CSRunner | None = None
+    sixd_runner: SixDRepNetRunner | None = None
+    if not missing:
+        l2cs_runner, sixd_runner, model_errors = load_optional_runners(
+            l2cs_repo, l2cs_weights, sixd_repo, sixd_weights, device
+        )
+
+    rows: list[dict[str, Any]] = []
+    for idx, image_path in enumerate(image_files(image_dir)):
+        row: dict[str, Any] = {
+            "movie_id": "test_selfy",
+            "sample_bucket": "image_test",
+            "sample_subtype": "selfy",
+            "sequence_id": "",
+            "shot_id": image_path.stem,
+            "bin_idx": str(idx),
+            "subject_track_id": "image",
+            "image_path": str(image_path),
+            "crop_video_path": "",
+            "overlay_path": str(image_path),
+            "openface_vis_path": "",
+            "l2cs_vis_path": "",
+            "sixd_vis_path": "",
+            "human_label": "",
+            "human_notes": "",
+            "openface_gaze_x": "",
+            "openface_gaze_y": "",
+            "openface_pose_Ry": "",
+            "openface_pose_Rx": "",
+            "openface_pose_Rz": "",
+            "openface_gaze_direction_old": "unknown",
+            "openface_pose_direction_old": "unknown",
+            "openface_gaze_direction": "unknown",
+            "openface_pose_direction": "unknown",
+            "openface_conflict": "0",
+            "openface_gaze_vs_sixd_head_agree": "",
+            "l2cs_vs_openface_gaze_agree": "",
+            "sixd_vs_openface_pose_agree": "",
+            "inference_status": "",
+            "error_note": "",
+        }
+        row.update(run_l2cs_placeholder())
+        row.update(run_sixd_placeholder())
+        errors: list[str] = []
+        if missing:
+            errors.extend(f"{name}: {dependency_errors.get(name, 'missing')}" for name in missing)
+            row["inference_status"] = "baseline_only"
+        else:
+            frame, frame_error = read_image_frame(image_path)
+            if frame_error:
+                errors.append(frame_error)
+            if frame is None:
+                row["inference_status"] = "frame_unavailable"
+            else:
+                openface_values, openface_error = run_openface_image(image_path, output_dir, openface_binary, idx)
+                if openface_values:
+                    row.update(openface_values)
+                if openface_error:
+                    errors.append(openface_error)
+                model_ok = 0
+                if l2cs_runner is not None:
+                    try:
+                        row.update(l2cs_runner.predict(frame))
+                        model_ok += 1
+                    except Exception as exc:  # pragma: no cover - model dependent
+                        errors.append(f"l2cs inference: {type(exc).__name__}: {exc}")
+                if sixd_runner is not None:
+                    try:
+                        row.update(sixd_runner.predict(frame))
+                        model_ok += 1
+                    except Exception as exc:  # pragma: no cover - model dependent
+                        errors.append(f"6drepnet inference: {type(exc).__name__}: {exc}")
+                if model_ok == 2:
+                    row["inference_status"] = "model_inference_ok"
+                elif model_ok == 1:
+                    row["inference_status"] = "partial_model_error"
+                else:
+                    row["inference_status"] = "baseline_only"
+                errors.extend(save_visualizations(row, frame, output_dir, idx, include_openface=bool(openface_values)))
+            errors.extend(f"{name}: {message}" for name, message in model_errors.items())
+        row["l2cs_vs_openface_gaze_agree"] = ""
+        row["sixd_vs_openface_pose_agree"] = compare_agreement(
+            str(row.get("sixd_pose_direction", "")), str(row.get("openface_pose_direction", ""))
+        )
+        row["openface_gaze_vs_sixd_head_agree"] = compare_agreement(
+            str(row.get("sixd_pose_direction", "")), str(row.get("openface_gaze_direction", ""))
+        )
+        row["error_note"] = "; ".join(dict.fromkeys(error for error in errors if error))
+        rows.append(row)
+
+    summary = {
+        "row_count": len(rows),
+        "mode": "image_dir",
+        "image_dir": str(image_dir),
+        "dependency_status": deps,
+        "dependency_errors": dependency_errors,
+        "model_errors": model_errors,
+        "l2cs_available": l2cs_runner is not None,
+        "sixdrepnet_available": sixd_runner is not None,
+        "inference_status_counts": dict(Counter(row["inference_status"] for row in rows)),
+        "direction_summary": direction_summary(rows),
+        "visualization_counts": {
+            "openface": sum(1 for row in rows if row.get("openface_vis_path")),
+            "l2cs": sum(1 for row in rows if row.get("l2cs_vis_path")),
+            "sixdrepnet": sum(1 for row in rows if row.get("sixd_vis_path")),
+        },
+        "output_csv": str(output_dir / "gaze_evidence_compare.csv"),
+        "output_html": str(output_dir / "gaze_evidence_compare.html"),
+    }
+    return rows, summary
 
 
 def fmt(value: Any) -> str:
@@ -782,11 +1098,13 @@ def render_html(rows: list[dict[str, Any]], summary: dict[str, Any], output_dir:
             ("bucket", f"{row.get('sample_bucket')} / {row.get('sample_subtype')}"),
             ("shot/bin", f"{row.get('shot_id')} / {row.get('bin_idx')}"),
             ("subject", row.get("subject_track_id")),
+            ("image", row.get("image_path")),
             ("human", f"{row.get('human_label')} {row.get('human_notes')}"),
-            ("OpenFace gaze", f"{row.get('openface_gaze_direction')} x={row.get('openface_gaze_x')} y={row.get('openface_gaze_y')}"),
-            ("OpenFace pose", f"{row.get('openface_pose_direction')} Ry={row.get('openface_pose_Ry')} Rx={row.get('openface_pose_Rx')}"),
-            ("L2CS", f"{row.get('l2cs_direction')} yaw={row.get('l2cs_yaw')} pitch={row.get('l2cs_pitch')}"),
-            ("6DRepNet", f"{row.get('sixd_pose_direction')} yaw={row.get('sixd_yaw')} pitch={row.get('sixd_pitch')} roll={row.get('sixd_roll')}"),
+            ("OpenFace gaze", f"{row.get('openface_gaze_direction')} old={row.get('openface_gaze_direction_old')} x={row.get('openface_gaze_x')} y={row.get('openface_gaze_y')}"),
+            ("OpenFace pose", f"{row.get('openface_pose_direction')} old={row.get('openface_pose_direction_old')} Ry={row.get('openface_pose_Ry')} Rx={row.get('openface_pose_Rx')}"),
+            ("L2CS", f"h={row.get('l2cs_direction')} v={row.get('l2cs_vertical_direction')} old_yaw_bucket={row.get('l2cs_direction_old')} yaw={row.get('l2cs_yaw')} pitch={row.get('l2cs_pitch')}"),
+            ("6DRepNet", f"{row.get('sixd_pose_direction')} old={row.get('sixd_pose_direction_old')} yaw={row.get('sixd_yaw')} pitch={row.get('sixd_pitch')} roll={row.get('sixd_roll')}"),
+            ("OF gaze vs 6D head", row.get("openface_gaze_vs_sixd_head_agree")),
             ("visualization", "OpenFace uses 0.5s bin mean values, not raw per-frame landmark output."),
             ("crop video", row.get("crop_video_path")),
             ("status", f"{row.get('inference_status')} {row.get('error_note')}"),
@@ -816,10 +1134,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--base-dir", type=Path, default=Path("outputs/video_proxy"))
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/video_proxy/model_bakeoff/v0_3"))
     parser.add_argument("--movies", default=",".join(MOVIES), help="Comma-separated movie IDs.")
+    parser.add_argument("--image-dir", type=Path, help="Optional image directory test mode.")
     parser.add_argument("--device", default="cpu", help="Torch device, e.g. cpu, cuda:0, or auto.")
     parser.add_argument("--l2cs-repo", type=Path, default=Path("models/gaze_estimation/L2CS-Net"))
     parser.add_argument("--l2cs-weights", type=Path, default=Path("models/gaze_estimation/L2CS-Net/models/L2CSNet_gaze360.pkl"))
     parser.add_argument("--sixd-repo", type=Path, default=Path("models/head_pose/6DRepNet360"))
+    parser.add_argument("--openface-binary", type=Path, default=Path("/home/sdu/Desktop/OpenFace/OpenFace/build/bin/FeatureExtraction"))
     parser.add_argument(
         "--sixd-weights",
         type=Path,
@@ -831,17 +1151,29 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = build_arg_parser().parse_args()
     os.environ.setdefault("MPLCONFIGDIR", str(Path("/tmp") / "matplotlib-expregaze"))
-    movies = [item.strip() for item in args.movies.split(",") if item.strip()]
-    rows, summary = build_compare_rows(
-        args.base_dir,
-        args.output_dir,
-        movies,
-        args.l2cs_repo,
-        args.l2cs_weights,
-        args.sixd_repo,
-        args.sixd_weights,
-        args.device,
-    )
+    if args.image_dir:
+        rows, summary = build_image_rows(
+            args.image_dir,
+            args.output_dir,
+            args.l2cs_repo,
+            args.l2cs_weights,
+            args.sixd_repo,
+            args.sixd_weights,
+            args.openface_binary,
+            args.device,
+        )
+    else:
+        movies = [item.strip() for item in args.movies.split(",") if item.strip()]
+        rows, summary = build_compare_rows(
+            args.base_dir,
+            args.output_dir,
+            movies,
+            args.l2cs_repo,
+            args.l2cs_weights,
+            args.sixd_repo,
+            args.sixd_weights,
+            args.device,
+        )
     write_csv(args.output_dir / "gaze_evidence_compare.csv", rows, OUTPUT_COLUMNS)
     write_json(args.output_dir / "gaze_evidence_bakeoff_summary.json", summary)
     render_html(rows, summary, args.output_dir)

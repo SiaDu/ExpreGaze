@@ -6,6 +6,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from expregaze.video_proxy.build_final_proxy_table import Stage09Config, run as run_stage09
 from expregaze.video_proxy.build_proxy_gaze_script import (
@@ -15,6 +16,7 @@ from expregaze.video_proxy.build_proxy_gaze_script import (
     build_track_index,
 )
 from expregaze.video_proxy.build_track_identities import Stage07Config, choose_sface_match, run as run_stage07
+from expregaze.video_proxy.run_openface_per_track import annotate_crop_quality, build_timebins_for_track
 from expregaze.video_proxy.stage_filter import filter_manifest_rows_by_stage_type, parse_stage_type_include
 
 
@@ -48,6 +50,149 @@ def read_csv(path: Path) -> list[dict[str, str]]:
 
 
 class VideoProxyPipelineTests(unittest.TestCase):
+    def test_stage06_crop_quality_marks_single_face_clean(self) -> None:
+        manifest_rows = [
+            {
+                "sequence_id": "seq",
+                "shot_id": "shot_0001",
+                "local_track_id": "trk_000",
+                "crop_x": 0,
+                "crop_y": 0,
+                "crop_w": 100,
+                "crop_h": 100,
+            }
+        ]
+        track_groups = [
+            {
+                "sequence_id": "seq",
+                "shot_id": "shot_0001",
+                "local_track_id": "trk_000",
+                "rows": [{"frame_idx": "10", "det_id": "0"}],
+            }
+        ]
+        detections = [
+            {
+                "movie_id": "tt",
+                "sequence_id": "seq",
+                "shot_id": "shot_0001",
+                "frame_idx": "10",
+                "det_id": "0",
+                "bbox_cx": "50",
+                "bbox_cy": "50",
+            },
+            {
+                "movie_id": "tt",
+                "sequence_id": "seq",
+                "shot_id": "shot_0001",
+                "frame_idx": "10",
+                "det_id": "1",
+                "bbox_cx": "150",
+                "bbox_cy": "50",
+            },
+        ]
+
+        annotate_crop_quality(manifest_rows, track_groups, detections)
+
+        self.assertEqual(manifest_rows[0]["crop_quality"], "single_face_clean")
+        self.assertEqual(manifest_rows[0]["other_face_count_max"], 0)
+        self.assertEqual(manifest_rows[0]["contaminated_frame_count"], 0)
+        self.assertEqual(manifest_rows[0]["checked_frame_count"], 1)
+
+    def test_stage06_crop_quality_marks_multi_face_contaminated(self) -> None:
+        manifest_rows = [
+            {
+                "sequence_id": "seq",
+                "shot_id": "shot_0001",
+                "local_track_id": "trk_000",
+                "crop_x": 0,
+                "crop_y": 0,
+                "crop_w": 100,
+                "crop_h": 100,
+            }
+        ]
+        track_groups = [
+            {
+                "sequence_id": "seq",
+                "shot_id": "shot_0001",
+                "local_track_id": "trk_000",
+                "rows": [{"frame_idx": "10", "det_id": "0"}],
+            }
+        ]
+        detections = [
+            {
+                "movie_id": "tt",
+                "sequence_id": "seq",
+                "shot_id": "shot_0001",
+                "frame_idx": "10",
+                "det_id": "0",
+                "bbox_cx": "50",
+                "bbox_cy": "50",
+            },
+            {
+                "movie_id": "tt",
+                "sequence_id": "seq",
+                "shot_id": "shot_0001",
+                "frame_idx": "10",
+                "det_id": "1",
+                "bbox_cx": "80",
+                "bbox_cy": "50",
+            },
+        ]
+
+        annotate_crop_quality(manifest_rows, track_groups, detections)
+
+        self.assertEqual(manifest_rows[0]["crop_quality"], "multi_face_contaminated")
+        self.assertEqual(manifest_rows[0]["other_face_count_max"], 1)
+        self.assertEqual(manifest_rows[0]["contaminated_frame_count"], 1)
+        self.assertEqual(manifest_rows[0]["checked_frame_count"], 1)
+
+    def test_stage06_timebins_downgrade_contaminated_crop_quality(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path = Path(tmp) / "openface.csv"
+            write_csv(
+                csv_path,
+                [
+                    {
+                        "timestamp": f"{idx / 30.0:.6f}",
+                        "success": "1",
+                        "confidence": "0.95",
+                        "gaze_angle_x": "0.1",
+                        "gaze_angle_y": "0.0",
+                        "pose_Rx": "0.0",
+                        "pose_Ry": "0.1",
+                        "pose_Rz": "0.0",
+                    }
+                    for idx in range(5)
+                ],
+                [
+                    "timestamp",
+                    "success",
+                    "confidence",
+                    "gaze_angle_x",
+                    "gaze_angle_y",
+                    "pose_Rx",
+                    "pose_Ry",
+                    "pose_Rz",
+                ],
+            )
+            rows = build_timebins_for_track(
+                {
+                    "movie_id": "tt",
+                    "sequence_id": "seq",
+                    "shot_id": "shot_0001",
+                    "shot_idx": "1",
+                    "local_track_id": "trk_000",
+                    "crop_start_sec": "0.000",
+                    "crop_quality": "multi_face_contaminated",
+                    "crop_video_path": "crop.mp4",
+                },
+                csv_path,
+                SimpleNamespace(timebin_sec=0.5, expression_proxy=False),
+            )
+
+            self.assertEqual(rows[0]["crop_quality"], "multi_face_contaminated")
+            self.assertEqual(rows[0]["gaze_quality"], "crop_multi_face_contaminated")
+
     def test_stage_type_filter_defaults_skip_multi_person(self) -> None:
         rows = [
             {"shot_id": "shot_0001", "stage_type": "single_speaking"},
@@ -314,6 +459,27 @@ class VideoProxyPipelineTests(unittest.TestCase):
         )
         self.assertEqual(low_margin[0]["proxy_status"], "ambiguous")
         self.assertEqual(low_margin[0]["failure_reason"], "low_margin")
+
+        contaminated = build_assignments(
+            [dict(timebins[0], bin_idx="12", gaze_quality="crop_multi_face_contaminated")],
+            [
+                {
+                    "sequence_id": "seq",
+                    "shot_id": "shot_0001",
+                    "subject_local_track_id": "trk_000",
+                    "bin_idx": "12",
+                    "candidate_type": "offscreen_place_or_away",
+                    "candidate_id": "offscreen_place_or_away",
+                    "total_score": "0.9",
+                }
+            ],
+            identity_lookup,
+            contexts,
+            config,
+        )
+        self.assertEqual(contaminated[0]["proxy_status"], "unknown")
+        self.assertEqual(contaminated[0]["failure_reason"], "crop_multi_face_contaminated")
+        self.assertEqual(contaminated[0]["smoothing_applied"], "0")
 
     def test_stage09_final_table_preserves_subject_bin(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
