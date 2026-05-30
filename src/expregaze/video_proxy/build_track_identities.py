@@ -1,9 +1,9 @@
 """Build shot-local-to-global track identities for the video proxy pipeline.
 
-Stage07 is deliberately conservative. It uses MovieNet body annotations as the
-primary weak supervision source, augments with optional SFace gallery matches,
-and falls back to single-speaker/single-track evidence. It does not read or
-modify proxy assignments.
+Stage07 is deliberately conservative. It uses visual identity gallery matches
+as the primary evidence source, falls back to MovieNet body annotations, and
+only then uses weaker speaker/track heuristics. It does not read or modify
+proxy assignments.
 """
 
 from __future__ import annotations
@@ -45,6 +45,11 @@ TRACK_IDENTITY_COLUMNS = [
     "evidence_note",
     "track_len",
     "track_conf",
+    "visual_backend",
+    "visual_score",
+    "visual_margin",
+    "prototype_id",
+    "weak_fallback_source",
 ]
 
 @dataclass(frozen=True)
@@ -67,6 +72,15 @@ class Stage07Config:
     sface_max_crops_per_track: int
     stage_type_include: set[str] | None
     overwrite: bool
+    identity_backend: str = "insightface"
+    insightface_model_name: str = "buffalo_l"
+    insightface_model_root: Path = Path("models/face_recognition/insightface")
+    insightface_provider: str = "CUDAExecutionProvider"
+    insightface_det_size: int = 640
+    visual_match_threshold: float = 0.50
+    visual_match_margin: float = 0.08
+    visual_min_track_confidence: float = 0.60
+    visual_max_crops_per_track: int = 5
 
     @property
     def track_identity_csv(self) -> Path:
@@ -172,6 +186,31 @@ def make_config(args: argparse.Namespace) -> Stage07Config:
             args.single_speaker_track_confidence
             if args.single_speaker_track_confidence is not None
             else stage.get("single_speaker_track_confidence", 0.58)
+        ),
+        identity_backend=str(args.identity_backend or stage.get("identity_backend", "insightface")).lower(),
+        insightface_model_name=str(args.insightface_model_name or stage.get("insightface_model_name", "buffalo_l")),
+        insightface_model_root=resolve_path(
+            args.insightface_model_root or stage.get("insightface_model_root") or "models/face_recognition/insightface",
+            project_root,
+        )
+        or project_root / "models/face_recognition/insightface",
+        insightface_provider=str(args.insightface_provider or stage.get("insightface_provider", "CUDAExecutionProvider")),
+        insightface_det_size=int(args.insightface_det_size or stage.get("insightface_det_size", 640)),
+        visual_match_threshold=float(
+            args.visual_match_threshold if args.visual_match_threshold is not None else stage.get("visual_match_threshold", 0.50)
+        ),
+        visual_match_margin=float(
+            args.visual_match_margin if args.visual_match_margin is not None else stage.get("visual_match_margin", 0.08)
+        ),
+        visual_min_track_confidence=float(
+            args.visual_min_track_confidence
+            if args.visual_min_track_confidence is not None
+            else stage.get("visual_min_track_confidence", stage.get("sface_min_track_confidence", 0.60))
+        ),
+        visual_max_crops_per_track=int(
+            args.visual_max_crops_per_track
+            if args.visual_max_crops_per_track is not None
+            else stage.get("visual_max_crops_per_track", stage.get("sface_max_crops_per_track", 5))
         ),
         enable_sface_gallery=bool(stage.get("enable_sface_gallery", True)) and not args.no_sface_gallery,
         sface_model_path=resolve_path(
@@ -409,6 +448,24 @@ def create_sface_recognizer(config: Stage07Config):
     return cv2.FaceRecognizerSF_create(str(config.sface_model_path), "")
 
 
+def create_insightface_analyzer(config: Stage07Config):
+    try:
+        from insightface.app import FaceAnalysis
+    except ImportError as exc:
+        raise RuntimeError(
+            "InsightFace is required for identity_backend=insightface. "
+            "Install project dependencies with uv/pip, or run Stage07 with --identity-backend sface/none."
+        ) from exc
+
+    provider = config.insightface_provider
+    providers = [provider] if provider else None
+    app = FaceAnalysis(name=config.insightface_model_name, root=str(config.insightface_model_root), providers=providers)
+    ctx_id = 0 if provider and "CUDA" in provider.upper() else -1
+    det_size = max(32, int(config.insightface_det_size))
+    app.prepare(ctx_id=ctx_id, det_size=(det_size, det_size))
+    return app
+
+
 def vector_norm(values: list[float]) -> float:
     return math.sqrt(sum(value * value for value in values))
 
@@ -426,7 +483,12 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
     return sum(x * y for x, y in zip(a, b))
 
 
-def crop_face_from_shot(shot_clip_path: Path, track_row: dict[str, str], margin: float = 0.20):
+def crop_face_from_shot(
+    shot_clip_path: Path,
+    track_row: dict[str, str],
+    margin: float = 0.20,
+    output_size: tuple[int, int] | None = (112, 112),
+):
     import cv2
 
     cap = cv2.VideoCapture(str(shot_clip_path))
@@ -458,7 +520,9 @@ def crop_face_from_shot(shot_clip_path: Path, track_row: dict[str, str], margin:
     crop = frame[iy1:iy2, ix1:ix2]
     if crop.size == 0:
         return None
-    return cv2.resize(crop, (112, 112))
+    if output_size is None:
+        return crop
+    return cv2.resize(crop, output_size)
 
 
 def embedding_for_track(
@@ -491,6 +555,59 @@ def embedding_for_track(
     return normalize_embedding(mean_values), len(embeddings), "ok"
 
 
+def choose_insightface_face(faces: list[Any]) -> Any | None:
+    if not faces:
+        return None
+    return max(
+        faces,
+        key=lambda face: max(0.0, safe_float(face.bbox[2]) - safe_float(face.bbox[0]))
+        * max(0.0, safe_float(face.bbox[3]) - safe_float(face.bbox[1])),
+    )
+
+
+def insightface_embedding_for_track(
+    analyzer: Any,
+    shot_clip_path: Path,
+    track_rows: list[dict[str, str]],
+    config: Stage07Config,
+) -> tuple[list[float], int, str]:
+    if analyzer is None:
+        return [], 0, "insightface_disabled"
+    embeddings: list[list[float]] = []
+    notes: Counter[str] = Counter()
+    selected_rows = sorted(track_rows, key=lambda row: safe_float(row.get("det_conf")), reverse=True)[
+        : max(1, config.visual_max_crops_per_track)
+    ]
+    for row in selected_rows:
+        crop = crop_face_from_shot(shot_clip_path, row, output_size=None)
+        if crop is None:
+            notes["crop_failed"] += 1
+            continue
+        try:
+            faces = analyzer.get(crop)
+        except Exception:
+            notes["insightface_error"] += 1
+            continue
+        face = choose_insightface_face(faces)
+        if face is None or not hasattr(face, "embedding"):
+            notes["no_face_embedding"] += 1
+            continue
+        values = normalize_embedding([float(value) for value in face.embedding.flatten().tolist()])
+        if values:
+            embeddings.append(values)
+        else:
+            notes["empty_embedding"] += 1
+    if not embeddings:
+        note = ",".join(f"{key}={value}" for key, value in sorted(notes.items())) or "no_insightface_embeddings"
+        return [], 0, note
+    dim = len(embeddings[0])
+    mean_values = [sum(vec[i] for vec in embeddings) / len(embeddings) for i in range(dim)]
+    note = "ok"
+    if notes:
+        note += ";" + ",".join(f"{key}={value}" for key, value in sorted(notes.items()))
+    return normalize_embedding(mean_values), len(embeddings), note
+
+
 def write_gallery_outputs(config: Stage07Config, gallery_rows: list[dict[str, Any]], gallery_vectors: list[dict[str, Any]]) -> None:
     config.identity_gallery_csv.parent.mkdir(parents=True, exist_ok=True)
     columns = [
@@ -498,6 +615,7 @@ def write_gallery_outputs(config: Stage07Config, gallery_rows: list[dict[str, An
         "global_person_id",
         "cast_pid",
         "prototype_id",
+        "visual_backend",
         "source_shot_id",
         "source_local_track_id",
         "quality_score",
@@ -532,6 +650,44 @@ def choose_sface_match(
     if top_score >= threshold and margin >= margin_threshold:
         return top_proto, top_score, second_score, margin
     return None, top_score, second_score, margin
+
+
+def score_gallery_match(
+    vector: list[float],
+    gallery_vectors: list[dict[str, Any]],
+    cast_constraint: set[str] | None = None,
+) -> tuple[dict[str, Any] | None, float, float, float]:
+    scored = []
+    for proto in gallery_vectors:
+        if cast_constraint and proto["cast_pid"] not in cast_constraint:
+            continue
+        score = cosine_similarity(vector, proto["embedding"])
+        scored.append((score, proto))
+    if not scored:
+        return None, -1.0, -1.0, 0.0
+    scored.sort(key=lambda item: item[0], reverse=True)
+    top_score, top_proto = scored[0]
+    second_score = scored[1][0] if len(scored) > 1 else -1.0
+    return top_proto, top_score, second_score, top_score - second_score
+
+
+def choose_visual_match(
+    vector: list[float],
+    gallery_vectors: list[dict[str, Any]],
+    cast_constraint: set[str],
+    threshold: float,
+    margin_threshold: float,
+) -> tuple[dict[str, Any] | None, float, float, float, str]:
+    if cast_constraint:
+        top_proto, top_score, second_score, margin = score_gallery_match(vector, gallery_vectors, cast_constraint)
+        if top_proto is not None and top_score >= threshold and margin >= margin_threshold:
+            return top_proto, top_score, second_score, margin, "cast_constraint"
+
+    top_proto, top_score, second_score, margin = score_gallery_match(vector, gallery_vectors)
+    if top_proto is not None and top_score >= threshold and margin >= margin_threshold:
+        scope = "global_after_constraint" if cast_constraint else "global"
+        return top_proto, top_score, second_score, margin, scope
+    return None, top_score, second_score, margin, "no_match"
 
 
 def build_sface_gallery_and_matches(
@@ -593,6 +749,7 @@ def build_sface_gallery_and_matches(
                 "global_person_id": global_person_id(cast_pid, shot_id, local_track_id),
                 "cast_pid": cast_pid,
                 "prototype_id": proto_id,
+                "visual_backend": "sface",
                 "source_shot_id": shot_id,
                 "source_local_track_id": local_track_id,
                 "quality_score": f"{track_conf:.6f}",
@@ -607,6 +764,7 @@ def build_sface_gallery_and_matches(
                 "global_person_id": global_person_id(cast_pid, shot_id, local_track_id),
                 "cast_pid": cast_pid,
                 "prototype_id": proto_id,
+                "visual_backend": "sface",
                 "embedding": vector,
                 "source_shot_id": shot_id,
                 "source_local_track_id": local_track_id,
@@ -637,12 +795,146 @@ def build_sface_gallery_and_matches(
                 "confidence": min(0.95, max(0.0, top_score)),
                 "source": "sface_gallery",
                 "status": "linked_pid",
+                "visual_backend": "sface",
+                "visual_score": top_score,
+                "visual_margin": margin,
+                "prototype_id": top_proto["prototype_id"],
                 "note": (
                     f"sface_top={top_score:.3f};second={second_score:.3f};margin={margin:.3f};"
                     f"prototype={top_proto['prototype_id']};crops={crop_count};{note}"
                 ),
             }
     return matches, gallery_rows, gallery_vectors
+
+
+def build_insightface_gallery_and_matches(
+    config: Stage07Config,
+    shot_manifest: list[dict[str, str]],
+    face_tracks: list[dict[str, str]],
+    name_to_pid: dict[str, str],
+) -> tuple[dict[tuple[str, str], dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    analyzer = create_insightface_analyzer(config)
+    manifest_by_key = {(row.get("sequence_id", ""), row.get("shot_id", "")): row for row in shot_manifest}
+    tracks_by_key: dict[tuple[str, str], list[dict[str, str]]] = defaultdict(list)
+    tracks_by_shot: dict[tuple[str, str], set[str]] = defaultdict(set)
+    for row in face_tracks:
+        key = (row.get("sequence_id", ""), row.get("shot_id", ""), row.get("local_track_id", ""))
+        tracks_by_key[(key[1], key[2])].append(row)
+        tracks_by_shot[(key[0], key[1])].add(key[2])
+
+    embeddings: dict[tuple[str, str], tuple[list[float], int, str]] = {}
+    for (shot_id, local_track_id), rows in tracks_by_key.items():
+        first = rows[0]
+        manifest = manifest_by_key.get((first.get("sequence_id", ""), shot_id), {})
+        shot_clip_path = Path(manifest.get("shot_clip_path", ""))
+        if not shot_clip_path.exists():
+            embeddings[(shot_id, local_track_id)] = ([], 0, "missing_shot_clip")
+            continue
+        embeddings[(shot_id, local_track_id)] = insightface_embedding_for_track(analyzer, shot_clip_path, rows, config)
+
+    gallery_rows: list[dict[str, Any]] = []
+    gallery_vectors: list[dict[str, Any]] = []
+    prototype_idx = 0
+    for (shot_id, local_track_id), rows in sorted(tracks_by_key.items()):
+        first = rows[0]
+        manifest = manifest_by_key.get((first.get("sequence_id", ""), shot_id), {})
+        if manifest.get("stage_type") != "single_speaking":
+            continue
+        if len(tracks_by_shot.get((first.get("sequence_id", ""), shot_id), set())) != 1:
+            continue
+        speakers = parse_json_cell(manifest.get("aligned_speakers"))
+        cast_pids = [canonical_pid(pid, name_to_pid) for pid in parse_json_cell(manifest.get("cast_pids")) if str(pid)]
+        cast_pids = [pid for pid in cast_pids if pid]
+        if len(speakers) != 1 or len(cast_pids) != 1:
+            continue
+        track_conf = safe_float(first.get("track_conf"))
+        if track_conf < config.visual_min_track_confidence:
+            continue
+        vector, crop_count, note = embeddings.get((shot_id, local_track_id), ([], 0, "missing_embedding"))
+        if not vector:
+            continue
+        cast_pid = cast_pids[0]
+        proto_id = f"proto_{prototype_idx:05d}"
+        prototype_idx += 1
+        gallery_rows.append(
+            {
+                "movie_id": config.movie_id,
+                "global_person_id": global_person_id(cast_pid, shot_id, local_track_id),
+                "cast_pid": cast_pid,
+                "prototype_id": proto_id,
+                "visual_backend": "insightface",
+                "source_shot_id": shot_id,
+                "source_local_track_id": local_track_id,
+                "quality_score": f"{track_conf:.6f}",
+                "embedding_dim": len(vector),
+                "crop_count": crop_count,
+                "note": note,
+            }
+        )
+        gallery_vectors.append(
+            {
+                "movie_id": config.movie_id,
+                "global_person_id": global_person_id(cast_pid, shot_id, local_track_id),
+                "cast_pid": cast_pid,
+                "prototype_id": proto_id,
+                "visual_backend": "insightface",
+                "embedding": vector,
+                "source_shot_id": shot_id,
+                "source_local_track_id": local_track_id,
+                "quality_score": track_conf,
+            }
+        )
+
+    write_gallery_outputs(config, gallery_rows, gallery_vectors)
+
+    matches: dict[tuple[str, str], dict[str, Any]] = {}
+    for (shot_id, local_track_id), rows in sorted(tracks_by_key.items()):
+        first = rows[0]
+        manifest = manifest_by_key.get((first.get("sequence_id", ""), shot_id), {})
+        cast_constraint = {
+            canonical_pid(pid, name_to_pid)
+            for pid in parse_json_cell(manifest.get("cast_pids"))
+            if canonical_pid(pid, name_to_pid)
+        }
+        vector, crop_count, note = embeddings.get((shot_id, local_track_id), ([], 0, "missing_embedding"))
+        if not vector or not gallery_vectors:
+            continue
+        top_proto, top_score, second_score, margin, match_scope = choose_visual_match(
+            vector, gallery_vectors, cast_constraint, config.visual_match_threshold, config.visual_match_margin
+        )
+        if top_proto is not None:
+            matches[(shot_id, local_track_id)] = {
+                "cast_pid": top_proto["cast_pid"],
+                "confidence": min(0.98, max(0.0, top_score)),
+                "source": "insightface_gallery",
+                "status": "linked_pid",
+                "visual_backend": "insightface",
+                "visual_score": top_score,
+                "visual_margin": margin,
+                "prototype_id": top_proto["prototype_id"],
+                "note": (
+                    f"visual_top={top_score:.3f};second={second_score:.3f};margin={margin:.3f};"
+                    f"scope={match_scope};prototype={top_proto['prototype_id']};crops={crop_count};{note}"
+                ),
+            }
+    return matches, gallery_rows, gallery_vectors
+
+
+def build_visual_gallery_and_matches(
+    config: Stage07Config,
+    shot_manifest: list[dict[str, str]],
+    face_tracks: list[dict[str, str]],
+    name_to_pid: dict[str, str],
+) -> tuple[dict[tuple[str, str], dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    backend = config.identity_backend.lower()
+    if backend in {"none", "off", "disabled"}:
+        write_gallery_outputs(config, [], [])
+        return {}, [], []
+    if backend == "insightface":
+        return build_insightface_gallery_and_matches(config, shot_manifest, face_tracks, name_to_pid)
+    if backend == "sface":
+        return build_sface_gallery_and_matches(config, shot_manifest, face_tracks, name_to_pid)
+    raise ValueError(f"Unsupported identity_backend={config.identity_backend!r}. Use insightface, sface, or none.")
 
 
 def load_annotations_by_shot(path: Path, name_to_pid: dict[str, str]) -> dict[str, list[dict[str, Any]]]:
@@ -685,9 +977,9 @@ def build_track_identities(
     annotations_by_shot: dict[str, list[dict[str, Any]]],
     cast_by_pid: dict[str, dict[str, str]],
     speaker_map: dict[str, dict[str, Any]],
-    sface_matches: dict[tuple[str, str], dict[str, Any]] | None = None,
+    visual_matches: dict[tuple[str, str], dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    sface_matches = sface_matches or {}
+    visual_matches = visual_matches or {}
     frame_sizes = detection_frame_sizes(detections)
     manifest_by_shot = {row.get("shot_id", ""): row for row in shot_manifest}
     tracks_by_key: dict[tuple[str, str], list[dict[str, str]]] = defaultdict(list)
@@ -733,28 +1025,46 @@ def build_track_identities(
         source = ""
         status = "unknown"
         note = "no_identity_evidence"
+        visual_backend = ""
+        visual_score = 0.0
+        visual_margin = 0.0
+        prototype_id = ""
+        weak_fallback_source = ""
 
-        matched = match_by_track.get((shot_id, local_track_id))
-        if matched is not None:
-            ann, confidence, note = matched
-            cast_pid = str(ann.get("pid", ""))
-            source = "movienet_body_bbox"
-            status = "linked_pid" if cast_pid and cast_pid != "others" else "linked_other"
-        elif (shot_id, local_track_id) in sface_matches:
-            match = sface_matches[(shot_id, local_track_id)]
+        if (shot_id, local_track_id) in visual_matches:
+            match = visual_matches[(shot_id, local_track_id)]
             cast_pid = str(match.get("cast_pid", ""))
             confidence = safe_float(match.get("confidence"))
-            source = str(match.get("source", "sface_gallery"))
+            source = str(match.get("source", "visual_gallery"))
             status = str(match.get("status", "linked_pid" if cast_pid else "unknown"))
-            note = str(match.get("note", "sface_gallery_match"))
-        elif len(speakers) == 1 and track_count == 1:
-            speaker_info = speaker_map.get(normalize_name(speakers[0]), {})
-            if speaker_info:
-                cast_pid = str(speaker_info.get("cast_pid", ""))
-                confidence = min(config.single_speaker_track_confidence, safe_float(speaker_info.get("confidence"), 0.0))
-                source = "single_speaker_single_track"
+            note = str(match.get("note", "visual_gallery_match"))
+            visual_backend = str(match.get("visual_backend", config.identity_backend))
+            visual_score = safe_float(match.get("visual_score"), confidence)
+            visual_margin = safe_float(match.get("visual_margin"))
+            prototype_id = str(match.get("prototype_id", ""))
+        else:
+            matched = match_by_track.get((shot_id, local_track_id))
+            if matched is not None:
+                ann, confidence, note = matched
+                cast_pid = str(ann.get("pid", ""))
+                source = "movienet_body_bbox"
                 status = "linked_pid" if cast_pid and cast_pid != "others" else "linked_other"
-                note = f"single_speaker={speakers[0]};speaker_source={speaker_info.get('source', '')}"
+                weak_fallback_source = source
+            elif len(speakers) == 1 and track_count == 1:
+                speaker_info = speaker_map.get(normalize_name(speakers[0]), {})
+                if speaker_info:
+                    cast_pid = str(speaker_info.get("cast_pid", ""))
+                    confidence = min(config.single_speaker_track_confidence, safe_float(speaker_info.get("confidence"), 0.0))
+                    source = "single_speaker_single_track"
+                    status = "linked_pid" if cast_pid and cast_pid != "others" else "linked_other"
+                    note = f"single_speaker={speakers[0]};speaker_source={speaker_info.get('source', '')}"
+                    weak_fallback_source = source
+
+        if source == "sface_gallery":
+            visual_backend = visual_backend or "sface"
+            visual_score = visual_score or confidence
+        elif source and source != "insightface_gallery" and not weak_fallback_source:
+            weak_fallback_source = source
 
         cast_info = cast_by_pid.get(cast_pid, {})
         rows.append(
@@ -774,6 +1084,11 @@ def build_track_identities(
                 "evidence_note": note,
                 "track_len": first.get("track_len", ""),
                 "track_conf": first.get("track_conf", ""),
+                "visual_backend": visual_backend,
+                "visual_score": f"{visual_score:.6f}" if visual_score else "",
+                "visual_margin": f"{visual_margin:.6f}" if visual_margin else "",
+                "prototype_id": prototype_id,
+                "weak_fallback_source": weak_fallback_source,
             }
         )
     return rows
@@ -833,9 +1148,9 @@ def run(config: Stage07Config) -> None:
     detections = [row for row in detections if row.get("movie_id") == config.movie_id and row.get("shot_id", "") in allowed_shots]
     speaker_map, speaker_evidence = build_speaker_pid_map(shot_manifest, name_to_pid, speaker_meta_map)
     annotations_by_shot = load_annotations_by_shot(config.annotation_json, name_to_pid)
-    sface_matches, gallery_rows, _gallery_vectors = build_sface_gallery_and_matches(config, shot_manifest, face_tracks, name_to_pid)
+    visual_matches, gallery_rows, _gallery_vectors = build_visual_gallery_and_matches(config, shot_manifest, face_tracks, name_to_pid)
     track_identity_rows = build_track_identities(
-        config, shot_manifest, face_tracks, detections, annotations_by_shot, cast_by_pid, speaker_map, sface_matches
+        config, shot_manifest, face_tracks, detections, annotations_by_shot, cast_by_pid, speaker_map, visual_matches
     )
     write_csv(config.track_identity_csv, track_identity_rows, TRACK_IDENTITY_COLUMNS)
 
@@ -852,6 +1167,13 @@ def run(config: Stage07Config) -> None:
         "stage_type_counts": stage_counts,
         "skipped_stage_type_count": skipped_stage_type_count,
         "config": {
+            "identity_backend": config.identity_backend,
+            "insightface_model_name": config.insightface_model_name,
+            "insightface_model_root": str(config.insightface_model_root),
+            "insightface_provider": config.insightface_provider,
+            "visual_match_threshold": config.visual_match_threshold,
+            "visual_match_margin": config.visual_match_margin,
+            "visual_min_track_confidence": config.visual_min_track_confidence,
             "min_body_match_score": config.min_body_match_score,
             "single_speaker_track_confidence": config.single_speaker_track_confidence,
         },
@@ -871,7 +1193,7 @@ def run(config: Stage07Config) -> None:
         f"skipped_stage_type={skipped_stage_type_count} stage_type_counts={json.dumps(stage_counts, sort_keys=True)}"
     )
     print(f"[Stage07] track_identities={len(track_identity_rows)} status_counts={json.dumps(identity_status_counts, sort_keys=True)}")
-    print(f"[Stage07] gallery={len(gallery_rows)}")
+    print(f"[Stage07] identity_backend={config.identity_backend} gallery={len(gallery_rows)}")
     print(f"[Stage07] track_identity_csv={config.track_identity_csv}")
     print(f"[Stage07] summary_json={config.summary_json}")
 
@@ -889,6 +1211,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-body-match-score", type=float)
     parser.add_argument("--single-speaker-track-confidence", type=float)
     parser.add_argument("--stage-type-include", help="Comma list of stage_type values to process, or 'all'.")
+    parser.add_argument("--identity-backend", choices=["insightface", "sface", "none"], help="Visual identity backend.")
+    parser.add_argument("--insightface-model-name", help="InsightFace model pack name, e.g. buffalo_l.")
+    parser.add_argument("--insightface-model-root", help="InsightFace root directory; model packs live under ROOT/models/{name}.")
+    parser.add_argument("--insightface-provider", help="ONNX Runtime provider, e.g. CUDAExecutionProvider or CPUExecutionProvider.")
+    parser.add_argument("--insightface-det-size", type=int)
+    parser.add_argument("--visual-match-threshold", type=float)
+    parser.add_argument("--visual-match-margin", type=float)
+    parser.add_argument("--visual-min-track-confidence", type=float)
+    parser.add_argument("--visual-max-crops-per-track", type=int)
     parser.add_argument("--sface-model-path")
     parser.add_argument("--sface-match-threshold", type=float)
     parser.add_argument("--sface-match-margin", type=float)

@@ -21,7 +21,13 @@ from expregaze.video_proxy.build_proxy_gaze_script import (
     build_candidates,
     build_track_index,
 )
-from expregaze.video_proxy.build_track_identities import Stage07Config, choose_sface_match, run as run_stage07
+from expregaze.video_proxy.build_track_identities import (
+    TRACK_IDENTITY_COLUMNS,
+    Stage07Config,
+    choose_sface_match,
+    choose_visual_match,
+    run as run_stage07,
+)
 from expregaze.video_proxy.run_openface_per_track import annotate_crop_quality, build_timebins_for_track
 from expregaze.video_proxy.stage_filter import filter_manifest_rows_by_stage_type, parse_stage_type_include
 
@@ -40,6 +46,11 @@ BAKEOFF_SPEC = importlib.util.spec_from_file_location("run_gaze_evidence_bakeoff
 assert BAKEOFF_SPEC is not None and BAKEOFF_SPEC.loader is not None
 run_gaze_evidence_bakeoff = importlib.util.module_from_spec(BAKEOFF_SPEC)
 BAKEOFF_SPEC.loader.exec_module(run_gaze_evidence_bakeoff)
+
+IDENTITY_REPORT_SPEC = importlib.util.spec_from_file_location("render_identity_report", Path("scripts/render_identity_report.py"))
+assert IDENTITY_REPORT_SPEC is not None and IDENTITY_REPORT_SPEC.loader is not None
+render_identity_report = importlib.util.module_from_spec(IDENTITY_REPORT_SPEC)
+IDENTITY_REPORT_SPEC.loader.exec_module(render_identity_report)
 
 
 def write_csv(path: Path, rows: list[dict[str, object]], columns: list[str]) -> None:
@@ -290,11 +301,14 @@ class VideoProxyPipelineTests(unittest.TestCase):
                 sface_max_crops_per_track=5,
                 stage_type_include={"single_speaking", "two_person_dialogue_simple"},
                 overwrite=True,
+                identity_backend="none",
             )
             run_stage07(config)
             rows = read_csv(identity_dir / "07_track_identity.csv")
             self.assertEqual(rows[0]["cast_pid"], "nm1")
             self.assertEqual(rows[0]["identity_source"], "single_speaker_single_track")
+            self.assertIn("visual_backend", rows[0])
+            self.assertIn("weak_fallback_source", rows[0])
 
     def test_sface_matcher_rejects_low_score_or_low_margin(self) -> None:
         gallery = [
@@ -308,6 +322,23 @@ class VideoProxyPipelineTests(unittest.TestCase):
 
         match, *_ = choose_sface_match([0.0, 1.0], gallery, {"nm1"}, 0.62, 0.08)
         self.assertIsNone(match)
+
+    def test_visual_matcher_falls_back_from_cast_constraint_to_global(self) -> None:
+        gallery = [
+            {"cast_pid": "nm1", "embedding": [1.0, 0.0], "prototype_id": "p1"},
+            {"cast_pid": "nm2", "embedding": [0.0, 1.0], "prototype_id": "p2"},
+        ]
+        match, top, second, margin, scope = choose_visual_match([1.0, 0.0], gallery, {"nm2"}, 0.90, 0.10)
+        self.assertEqual(match["cast_pid"], "nm1")
+        self.assertGreaterEqual(top, 0.90)
+        self.assertGreaterEqual(margin, 0.10)
+        self.assertEqual(scope, "global_after_constraint")
+
+    def test_track_identity_columns_keep_core_and_visual_evidence(self) -> None:
+        for column in ["global_person_id", "cast_pid", "identity_confidence", "identity_source", "identity_status"]:
+            self.assertIn(column, TRACK_IDENTITY_COLUMNS)
+        for column in ["visual_backend", "visual_score", "visual_margin", "prototype_id", "weak_fallback_source"]:
+            self.assertIn(column, TRACK_IDENTITY_COLUMNS)
 
     def test_stage07_uses_identity_columns_when_present(self) -> None:
         config = Stage08Config(
@@ -1070,6 +1101,108 @@ class VideoProxyPipelineTests(unittest.TestCase):
             summary = json.loads((out_dir / "direction_calibration_summary.json").read_text(encoding="utf-8"))
             self.assertEqual(summary["reviewed_count"], 1)
             self.assertEqual(summary["bad_track_count"], 0)
+
+    def test_identity_report_html_handles_missing_preview(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            out_dir = root / "identity_report"
+            manifest = [
+                {
+                    "movie_id": "tt",
+                    "sequence_id": "seq",
+                    "shot_id": "shot_0001",
+                    "shot_clip_path": str(root / "missing.mp4"),
+                }
+            ]
+            identities = [
+                {
+                    "movie_id": "tt",
+                    "sequence_id": "seq",
+                    "shot_id": "shot_0001",
+                    "local_track_id": "trk_000",
+                    "global_person_id": "pid:nm1",
+                    "cast_pid": "nm1",
+                    "cast_name": "Actor",
+                    "character_name": "Character",
+                    "identity_confidence": "0.92",
+                    "identity_source": "insightface_gallery",
+                    "identity_status": "linked_pid",
+                    "visual_backend": "insightface",
+                    "visual_score": "0.91",
+                    "visual_margin": "0.12",
+                    "prototype_id": "proto_00001",
+                    "weak_fallback_source": "",
+                    "evidence_note": "visual_top=0.910",
+                },
+                {
+                    "movie_id": "tt",
+                    "sequence_id": "seq",
+                    "shot_id": "shot_0002",
+                    "local_track_id": "trk_000",
+                    "cast_pid": "nm2",
+                    "cast_name": "Fallback Actor",
+                    "character_name": "Fallback Character",
+                    "identity_confidence": "0.00",
+                    "identity_source": "",
+                    "identity_status": "unknown",
+                    "weak_fallback_source": "single_speaker_single_track",
+                    "evidence_note": "no_identity_evidence",
+                },
+            ]
+            gallery = [
+                {
+                    "movie_id": "tt",
+                    "global_person_id": "pid:nm1",
+                    "cast_pid": "nm1",
+                    "prototype_id": "proto_00001",
+                    "visual_backend": "insightface",
+                    "source_shot_id": "shot_0001",
+                    "source_local_track_id": "trk_000",
+                    "quality_score": "0.9",
+                    "crop_count": "2",
+                    "note": "ok",
+                }
+            ]
+            tracks = [
+                {
+                    "movie_id": "tt",
+                    "shot_id": "shot_0001",
+                    "local_track_id": "trk_000",
+                    "frame_idx": "0",
+                    "det_conf": "0.9",
+                    "bbox_x1": "10",
+                    "bbox_y1": "10",
+                    "bbox_x2": "40",
+                    "bbox_y2": "40",
+                }
+            ]
+
+            summary = render_identity_report.render_report(
+                identities,
+                gallery,
+                manifest,
+                tracks,
+                out_dir,
+                max_samples_per_source=10,
+                identity_display_aliases={
+                    "nm1": {
+                        "display_role": "Dorothy",
+                        "movienet_character": "MovieNet Character",
+                    }
+                },
+            )
+            html = (out_dir / "identity_report.html").read_text(encoding="utf-8")
+            self.assertIn("insightface_gallery", html)
+            self.assertIn("Dorothy", html)
+            self.assertIn("MovieNet Character", html)
+            self.assertIn("Fallback Character", html)
+            self.assertIn("cast pid", html)
+            self.assertIn("visual score", html)
+            self.assertIn("prototype", html)
+            self.assertIn("weak_fallback_source", html)
+            self.assertIn("missing_shot_clip", html)
+            self.assertEqual(summary["sample_count"], 2)
+            self.assertEqual(summary["preview_status_counts"]["missing_shot_clip"], 1)
 
     def test_gaze_evidence_bakeoff_sampling_and_baseline_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

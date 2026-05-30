@@ -77,6 +77,12 @@ stages:
     min_track_conf: 0.6
     timebin_sec: 0.5
     openface_binary: /home/sdu/Desktop/OpenFace/OpenFace/build/bin/FeatureExtraction
+    l2cs_repo: models/gaze_estimation/L2CS-Net
+    l2cs_weights: models/gaze_estimation/L2CS-Net/models/L2CSNet_gaze360.pkl
+    sixd_repo: models/head_pose/6DRepNet360
+    sixd_weights: models/head_pose/6DRepNet360/checkpoints/6DRepNet360_Full-Rotation_300W_LP_Panoptic.pth
+    device: cuda:0
+    model_sample_stride: 1
     save_aligned_faces: false
     openface_aus: true
     expression_proxy: true
@@ -117,6 +123,15 @@ stages:
   build_track_identities:
     enabled: true
     overwrite: true
+    identity_backend: insightface
+    insightface_model_name: buffalo_l
+    insightface_model_root: models/face_recognition/insightface
+    insightface_provider: CUDAExecutionProvider
+    insightface_det_size: 640
+    visual_match_threshold: 0.50
+    visual_match_margin: 0.08
+    visual_min_track_confidence: 0.60
+    visual_max_crops_per_track: 5
     min_body_match_score: 0.55
     single_speaker_track_confidence: 0.58
     enable_sface_gallery: true

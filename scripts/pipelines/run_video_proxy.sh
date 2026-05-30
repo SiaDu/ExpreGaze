@@ -13,6 +13,14 @@ EXTRA_ARGS=("$@")
 
 cd "$PROJECT_ROOT"
 
+if [[ -z "${PYTHON_BIN:-}" && -x "$PROJECT_ROOT/.venv/bin/python" ]]; then
+  export PYTHON_BIN="$PROJECT_ROOT/.venv/bin/python"
+fi
+
+export PYTHONPATH="$PROJECT_ROOT/src:${PYTHONPATH:-}"
+export UV_CACHE_DIR="${UV_CACHE_DIR:-/tmp/expregaze-uv-cache}"
+
+echo "[video_proxy] python=${PYTHON_BIN:-auto}"
 echo "[video_proxy] Stage04: extract selected sequence videos and shot clips"
 bash scripts/stages/04_extract_video_sequences.sh "$RUN_CONFIG" "${EXTRA_ARGS[@]}"
 

@@ -21,3 +21,12 @@ character_map:
     name: null
     movienet_pid: null
     script_aliases: null
+
+identity_display_aliases:
+  nm0000023: {display_role: Dorothy}
+  nm0604656: {display_role: Wizard, movienet_character: Professor Marvel}
+  nm0001961: {display_role: Scarecrow, movienet_character: Hunk}
+  nm0481618: {display_role: Lion, movienet_character: Zeke}
+  nm0355095: {display_role: Tin Man, movienet_character: Hickory}
+  nm0002121: {display_role: Witch, movienet_character: Miss Gulch}
+  nm0000992: {display_role: Glinda}
